@@ -1,5 +1,7 @@
 {
   "devDependencies": {
+    "serverless": "3.35.2",
+    "serverless-api-gateway-caching": "^1.10.4",
     "serverless-prune-plugin": "^2.1.0",
     "serverless-python-requirements": "^6.1.1"
   }
