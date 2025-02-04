@@ -29,10 +29,35 @@ provider:
             - !Join ["", [!GetAtt DynamoDBMatchTable.Arn, "/index/*"]]
             - !GetAtt DynamoDBUserTable.Arn
             - !Join ["", [!GetAtt DynamoDBUserTable.Arn, "/index/*"]]
+            - !GetAtt DynamoDBRecordTable.Arn  # レコード
+            - !Join ["", [!GetAtt RecordTable.Arn, "/index/*"]] 
+        - Effect: Allow
+          Action:
+            - lambda:InvokeFunction
+          Resource:
+            - arn:aws:lambda:${aws:region}:${aws:accountId}:function:${self:service}-${sls:stage}-*
+        - Effect: Allow
+          Action:
+            - ssm:GetParameters
+          Resource:
+            - arn:aws:ssm:${aws:region}:${aws:accountId}:parameter/${self:service}/bubbleApiKey
+        - Effect: Allow
+          Action:
+            - sqs:SendMessage
+            - sqs:ReceiveMessage
+            - sqs:DeleteMessage
+            - sqs:GetQueueAttributes
+          Resource:
+            - arn:aws:sqs:${aws:region}:${aws:accountId}:${self:service}-${sls:stage}-match-report-queue
+            - !GetAtt AggregationQueue.Arn
+
   environment:
     MATCH_QUEUE: !Ref DynamoDBMatchQueue
     MATCH_TABLE: !Ref DynamoDBMatchTable
     USER_TABLE: !Ref DynamoDBUserTable
+    REPORT_QUEUE: !Ref ReportQueue
+    AGGREGATION_QUEUE: !Ref AggregationQueue
+    RECORD_TABLE: !Ref DynamoDBRecordTable
 
 package:
   individually: true
@@ -42,28 +67,34 @@ package:
     - pyproject.toml
     - poetry.lock
 
+# インキュー ########################
+
 functions:
   inqueue: # キューにインキューするAPI
-    handler: app/inqueue.handle
-    events:
+    handler: app/queue.inqueue
       - http:
           path: v1/queue/_inqueue
           method: post
           private: true
+
   dequeue: # キューからデキューするAPI
-    handler: app/dequeue.handle
+    handler: app/queue.dequeue
     events:
       - http:
           path: v1/queue/_dequeue
           method: post
           private: true
+
   queue_info: # キューの情報を取得するAPI
-    handler: app/queue_info.handle
+    handler: app/queue.get_info
     events:
       - http:
           path: v1/queue
           method: get
           private: true
+
+  # マッチメイク ########################
+
   match_make: # マッチメイクするバッチ
     handler: app/match_make.handle
     events:
@@ -71,6 +102,31 @@ functions:
           name: ${sls:stage}-${self:service}-match-make-schedule
           description: Schedule for match making
           rate: cron(*/5 * * * ? *)
+          enabled: ${self:custom.cache.${sls:stage}.schedule_enabled}
+    environment:
+      LAMBDA_FUNC_NOTIFY: ${self:service}-${sls:stage}-notify_users
+      BUBBLE_API_ASSIGN_MATCH: ${param:bubble_assign_match_id}
+      BUBBLE_API_QUEUE_COUNT: ${param:bubble_queue_count}
+      BUBBLE_API_NOTIFY_DISCORD: ${param:bubble_notify_discord}
+      RECORD_TABLE: !Ref DynamoDBRecordTable  # 追加
+      DUMMY: ${param:dummy_account}
+    timeout: 15
+
+  notify_users: # マッチメイク時、ユーザーをマッチにアサインする箇所を同期処理で行うために分割
+    handler: app/notify_users.handle  # notify_users 関数のエントリーポイント
+    timeout: 10  # タイムアウトを設定
+    memorySize: 128  # メモリサイズを調整
+    environment: 
+      BUBBLE_API_ASSIGN_MATCH: ${param:bubble_assign_match_id}
+      RECORD_TABLE: !Ref DynamoDBRecordTable  
+    events: 
+      - http:
+          path: v1/notify_users
+          method: post
+          private: true  #  API キー保護
+
+  # 結果報告、集計 ########################
+
   match_report: # 試合終了後の試合結果を報告するAPI
     handler: app/match_report.handle
     events:
@@ -78,22 +134,54 @@ functions:
           path: v1/match/_report
           method: post
           private: true
-  match_judge: # 試合終了後、試合結果を判定するバッチ
+    environment:
+      LAMBDA_FUNC_NAME: ${self:service}-${sls:stage}-enqueue_aggregation
+
+  process_report:
+    handler: app/match_report.process_report_queue
+    events:
+      - sqs:
+          arn:
+            Fn::GetAtt:
+              - ReportQueue
+              - Arn
+    environment:
+      LAMBDA_FUNC_NAME: ${self:service}-${sls:stage}-match_judge
+
+  match_judge:
     handler: app/match_judge.handle
-  user_upsert: # ユーザを作成・更新するAPI
+    environment:
+      AGGREGATION_QUEUE: 
+        Ref: AggregationQueue
+
+  process_aggregation_queue:
+    handler: app/match_judge.process_queue
+    events:
+      - sqs:
+          arn:
+            Fn::GetAtt:
+              - AggregationQueue
+              - Arn
+    timeout: 15
+
+  # ユーザー情報 ########################
+
+  user_upsert: # ユーザを作成・更新するAPI　未使用
     handler: app/user_upsert.handle
     events:
       - http:
           path: v1/users/{user_id}
           method: post
           private: true
-  user_delete: # ユーザを削除するAPI
+
+  user_delete: # ユーザを削除するAPI　未使用
     handler: app/user_delete.handle
     events:
       - http:
           path: v1/users/{user_id}/_delete
           method: post
           private: true
+
   user_info: # ユーザ情報を返すAPI
     handler: app/user_info.handle
     events:
@@ -101,17 +189,65 @@ functions:
           path: v1/users/{user_id}
           method: get
           private: true
-  rankings: # ユーザのレートランキングを返すAPI
-    handler: app/rankings.handle
+    environment:
+      USER_TABLE: !Ref DynamoDBUserTable
+      RECORD_TABLE: !Ref DynamoDBRecordTable  
+
+  # ランキング ########################
+  '''
+  # 暫定順位を算出 一旦PASS
+  update_ranking:
+    handler: app/rankings.update_ranking
+    events:
+      - schedule:
+          name: ${sls:stage}-${self:service}-update-ranking-schedule
+          rate: rate(5 minutes)
+          enabled: ${self:custom.cache.${sls:stage}.schedule_enabled}
+    environment:
+      USER_TABLE: !Ref DynamoDBUserTable
+    timeout: 15
+  '''
+
+
+  get_ranking: # ユーザのレートランキングを返すAPI
+    handler: app/rankings.get_ranking
     events:
       - http:
-          path: v1/rankings
+          path: v1/ranking
           method: get
+          cors: true
           private: true
+          caching: 
+            enabled: ${self:custom.cache.${sls:stage}.cache_enabled}
+            ttlInSeconds: ${self:custom.cache.${sls:stage}.cache_ttl}
+            cacheKeyParameters:
+              - name: "method.request.querystring.namespace" # 必要に応じて変更
+    environment:
+      USER_TABLE: !Ref DynamoDBUserTable
+      RECORD_TABLE: !Ref DynamoDBRecordTable
+
+
+custom:
+  prune:
+    automatic: true
+    number: 3
+  pythonRequirements:
+    dockerizePip: true
+
+  cache:
+    prd:
+      cache_enabled: true
+      cache_ttl: 600 # 10分
+      schedule_enabled: true
+    dev:
+      cache_enabled: false
+      cache_ttl: 0
+      schedule_enabled: false
 
 plugins:
   - serverless-python-requirements
   - serverless-prune-plugin
+  - serverless-api-gateway-caching
 
 resources:
   Resources:
@@ -205,3 +341,54 @@ resources:
             Projection:
               ProjectionType: ALL
         BillingMode: PAY_PER_REQUEST
+
+  RecordTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${sls:stage}-${self:service}-record-table
+        AttributeDefinitions:
+          - AttributeName: user_id
+            AttributeType: S
+          - AttributeName: started_date
+            AttributeType: "N"
+          - AttributeName: match_id
+            AttributeType: "N"
+        KeySchema:
+          - AttributeName: user_id # Use user_id as namespace 
+            KeyType: HASH
+          - AttributeName: match_id
+            KeyType: RANGE
+        GlobalSecondaryIndexes:
+          - IndexName: started_date_index
+            KeySchema:
+              - AttributeName: user_id
+                KeyType: HASH
+              - AttributeName: started_date
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+        BillingMode: PAY_PER_REQUEST
+
+    # SQS
+    ReportQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${self:service}-${sls:stage}-match-report-queue
+    AggregationQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ${sls:stage}-${self:service}-aggregation-queue.fifo
+        FifoQueue: true
+        ContentBasedDeduplication: true # 同一のメッセージは重複して処理されないようにする
+
+params:
+  prd:
+    bubble_assign_match_id: https://unitemate.com/api/1.1/wf/aws_player_assign_match
+    bubble_queue_count: https://unitemate.com/api/1.1/wf/aws_queue_count
+    bubble_notify_discord: https://unitemate.com/api/1.1/wf/aws_notify_discord
+    dummy_account: "1734557995118x731332103265083300"
+  dev:
+    bubble_assign_match_id: https://unitemate.com/version-test/api/1.1/wf/aws_player_assign_match
+    bubble_queue_count: https://unitemate.com/version-test/api/1.1/wf/aws_queue_count
+    bubble_notify_discord: https://unitemate.com/version-test/api/1.1/wf/aws_notify_discord
+    dummy_account: "1734023940139x458248834150225500"
