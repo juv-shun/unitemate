@@ -22,11 +22,12 @@ user_data = dynamodb.Table(os.environ["USER_TABLE"])
 connection_table = dynamodb.Table(os.environ["CONNECTION_TABLE"])
 
 
-
 def update_bubble_queue_via_ws(queue_count):
     try:
         connection_resp = connection_table.scan(ProjectionExpression="connection_id")
-        connection_ids = [item["connection_id"] for item in connection_resp.get("Items", [])]
+        connection_ids = [
+            item["connection_id"] for item in connection_resp.get("Items", [])
+        ]
         asyncio.run(broadcast_last_queue_info(queue_count, connection_ids))
     except Exception as e:
         pass
@@ -36,20 +37,15 @@ def handle(event, _):
     # マッチキューからマッチング待ちのユーザを取得
     users = get_queue_users(queue)
 
-    # bubbleにキューの数を通知
     matched_unixtime = int(datetime.now(JST).replace(microsecond=0).timestamp())
     lastqueuecnt = len(users)
-    print(f"users:{users}")
     # キュー人数が6人以下ならマッチしない
-    if lastqueuecnt < 6:
-        # 前回マッチ時刻、前回キュー人数を保存
-        ongoing = create_previous_match_info(matched_unixtime, users, 0)
-
+    if lastqueuecnt < 10:
         update_bubble_queue_via_ws(lastqueuecnt)
-
         return []
-    print(f"users:{users}")
     
+    print(f"users:{users}")
+
     # ユーザーテーブルを参照して各ユーザーのレートを取得
     users = update_queue_users(users)
 
@@ -79,7 +75,9 @@ def handle(event, _):
 
     match_ids = []
     for match in matches:
-        match_id, lobby_id = create_match_record(match, matched_unixtime, match_id_base + match_id_counter)
+        match_id, lobby_id = create_match_record(
+            match, matched_unixtime, match_id_base + match_id_counter
+        )
         match_id_counter += 1
         matched_users.append(match[0])
         matched_users.append(match[1])
@@ -114,7 +112,9 @@ def handle(event, _):
     return match_ids
 
 
-def invoke_notification_lambda(match_id, lobby_id, playerA, playerB, deckA, deckB, rateA, rateB, maxA, maxB):
+def invoke_notification_lambda(
+    match_id, lobby_id, playerA, playerB, deckA, deckB, rateA, rateB, maxA, maxB
+):
     client = boto3.client("lambda")
 
     response = client.invoke(
@@ -147,7 +147,7 @@ def get_queue_users(queue):
         IndexName="rate_index",
         KeyConditionExpression=Key("namespace").eq("default"),
         ScanIndexForward=False,
-        ProjectionExpression="user_id, rate, deck_type, blocking",
+        ProjectionExpression="user_id, rate, blocking, role, rate_spread_speed, rate_spread_count",
     )
     return response["Items"]
 
@@ -166,15 +166,9 @@ def update_queue_users(users):
             rate = response["Item"].get("rate")
         except:
             rate = 1500
-        try:
-            maxrate = response["Item"].get("pokepoke_max_rate")
-        except:
-            maxrate = 1500
 
         user["rate"] = rate
-        user["maxrate"] = maxrate
 
-    print(users)
     return users
 
 

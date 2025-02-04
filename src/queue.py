@@ -11,12 +11,12 @@ from pydantic import BaseModel, ValidationError, field_serializer
 import asyncio
 
 from .ws_helper import broadcast_queue_count
+
 dynamodb = boto3.resource("dynamodb")
 queue = dynamodb.Table(os.environ["MATCH_QUEUE"])
 
 table = dynamodb.Table(os.environ["MATCH_TABLE"])
 connection_table = dynamodb.Table(os.environ["CONNECTION_TABLE"])
-
 
 
 class InqueueModel(BaseModel):
@@ -26,15 +26,19 @@ class InqueueModel(BaseModel):
     role: str
     range_spread_speed: int
     range_spread_count: int
-    inqueued_unixtime: datetime = datetime.now(ZoneInfo("Asia/Tokyo")).replace(microsecond=0)
+    inqueued_unixtime: datetime = datetime.now(ZoneInfo("Asia/Tokyo")).replace(
+        microsecond=0
+    )
 
     @field_serializer("inqueued_unixtime")
     def serialize_inqueued_unixtime(self, inqueued_unixtime: datetime) -> int:
         return int(inqueued_unixtime.timestamp())
 
+
 class DequeueModel(BaseModel):
     namespace: str = "default"
     user_id: str
+
 
 def get_queue_count():
     # マッチキューの待ち人数を取得
@@ -49,10 +53,13 @@ def update_queue_count():
     # 接続している全ユーザーの connection_id を取得
     try:
         connection_resp = connection_table.scan(ProjectionExpression="connection_id")
-        connection_ids = [item["connection_id"] for item in connection_resp.get("Items", [])]
+        connection_ids = [
+            item["connection_id"] for item in connection_resp.get("Items", [])
+        ]
         asyncio.run(broadcast_queue_count(get_queue_count(), connection_ids))
     except Exception as e:
         pass
+
 
 def inqueue(event, _):
     # バリデーションチェック
@@ -64,6 +71,7 @@ def inqueue(event, _):
     queue.put_item(Item=model.model_dump())
     update_queue_count()
     return {"statusCode": 200, "body": None}
+
 
 def dequeue(event, _):
     try:
@@ -97,4 +105,3 @@ def get_info(event, _):
     }
 
     return {"statusCode": 200, "body": json.dumps(response_body)}
-

@@ -30,7 +30,7 @@ provider:
             - !GetAtt DynamoDBUserTable.Arn
             - !Join ["", [!GetAtt DynamoDBUserTable.Arn, "/index/*"]]
             - !GetAtt DynamoDBRecordTable.Arn  # レコード
-            - !Join ["", [!GetAtt RecordTable.Arn, "/index/*"]] 
+            - !Join ["", [!GetAtt DynamoDBRecordTable.Arn, "/index/*"]]
         - Effect: Allow
           Action:
             - lambda:InvokeFunction
@@ -67,26 +67,28 @@ package:
     - pyproject.toml
     - poetry.lock
 
-# インキュー ########################
-
 functions:
-  inqueue: # キューにインキューするAPI
-    handler: app/queue.inqueue
+  # インキュー ########################
+  # キューにインキューするAPI
+  inqueue:
+    handler: src/queue.inqueue
+    events:
       - http:
           path: v1/queue/_inqueue
           method: post
           private: true
 
-  dequeue: # キューからデキューするAPI
-    handler: app/queue.dequeue
+  # キューからデキューするAPI
+  dequeue:
+    handler: src/queue.dequeue
     events:
       - http:
           path: v1/queue/_dequeue
           method: post
           private: true
 
-  queue_info: # キューの情報を取得するAPI
-    handler: app/queue.get_info
+  queue_info:
+    handler: src/queue.get_info
     events:
       - http:
           path: v1/queue
@@ -94,9 +96,8 @@ functions:
           private: true
 
   # マッチメイク ########################
-
   match_make: # マッチメイクするバッチ
-    handler: app/match_make.handle
+    handler: src/match_make.handle
     events:
       - schedule:
           name: ${sls:stage}-${self:service}-match-make-schedule
@@ -113,22 +114,21 @@ functions:
     timeout: 15
 
   notify_users: # マッチメイク時、ユーザーをマッチにアサインする箇所を同期処理で行うために分割
-    handler: app/notify_users.handle  # notify_users 関数のエントリーポイント
+    handler: src/notify_users.handle  # notify_users 関数のエントリーポイント
     timeout: 10  # タイムアウトを設定
     memorySize: 128  # メモリサイズを調整
-    environment: 
+    environment:
       BUBBLE_API_ASSIGN_MATCH: ${param:bubble_assign_match_id}
-      RECORD_TABLE: !Ref DynamoDBRecordTable  
-    events: 
+      RECORD_TABLE: !Ref DynamoDBRecordTable
+    events:
       - http:
           path: v1/notify_users
           method: post
           private: true  #  API キー保護
 
   # 結果報告、集計 ########################
-
   match_report: # 試合終了後の試合結果を報告するAPI
-    handler: app/match_report.handle
+    handler: src/match_report.handle
     events:
       - http:
           path: v1/match/_report
@@ -138,7 +138,7 @@ functions:
       LAMBDA_FUNC_NAME: ${self:service}-${sls:stage}-enqueue_aggregation
 
   process_report:
-    handler: app/match_report.process_report_queue
+    handler: src/match_report.process_report_queue
     events:
       - sqs:
           arn:
@@ -149,13 +149,13 @@ functions:
       LAMBDA_FUNC_NAME: ${self:service}-${sls:stage}-match_judge
 
   match_judge:
-    handler: app/match_judge.handle
+    handler: src/match_judge.handle
     environment:
-      AGGREGATION_QUEUE: 
+      AGGREGATION_QUEUE:
         Ref: AggregationQueue
 
   process_aggregation_queue:
-    handler: app/match_judge.process_queue
+    handler: src/match_judge.process_queue
     events:
       - sqs:
           arn:
@@ -165,9 +165,8 @@ functions:
     timeout: 15
 
   # ユーザー情報 ########################
-
   user_upsert: # ユーザを作成・更新するAPI　未使用
-    handler: app/user_upsert.handle
+    handler: src/user_upsert.handle
     events:
       - http:
           path: v1/users/{user_id}
@@ -175,7 +174,7 @@ functions:
           private: true
 
   user_delete: # ユーザを削除するAPI　未使用
-    handler: app/user_delete.handle
+    handler: src/user_delete.handle
     events:
       - http:
           path: v1/users/{user_id}/_delete
@@ -183,7 +182,7 @@ functions:
           private: true
 
   user_info: # ユーザ情報を返すAPI
-    handler: app/user_info.handle
+    handler: src/user_info.handle
     events:
       - http:
           path: v1/users/{user_id}
@@ -191,33 +190,18 @@ functions:
           private: true
     environment:
       USER_TABLE: !Ref DynamoDBUserTable
-      RECORD_TABLE: !Ref DynamoDBRecordTable  
+      RECORD_TABLE: !Ref DynamoDBRecordTable
 
   # ランキング ########################
-  '''
-  # 暫定順位を算出 一旦PASS
-  update_ranking:
-    handler: app/rankings.update_ranking
-    events:
-      - schedule:
-          name: ${sls:stage}-${self:service}-update-ranking-schedule
-          rate: rate(5 minutes)
-          enabled: ${self:custom.cache.${sls:stage}.schedule_enabled}
-    environment:
-      USER_TABLE: !Ref DynamoDBUserTable
-    timeout: 15
-  '''
-
-
   get_ranking: # ユーザのレートランキングを返すAPI
-    handler: app/rankings.get_ranking
+    handler: src/rankings.get_ranking
     events:
       - http:
           path: v1/ranking
           method: get
           cors: true
           private: true
-          caching: 
+          caching:
             enabled: ${self:custom.cache.${sls:stage}.cache_enabled}
             ttlInSeconds: ${self:custom.cache.${sls:stage}.cache_ttl}
             cacheKeyParameters:
@@ -226,13 +210,13 @@ functions:
       USER_TABLE: !Ref DynamoDBUserTable
       RECORD_TABLE: !Ref DynamoDBRecordTable
 
-
 custom:
   prune:
     automatic: true
     number: 3
   pythonRequirements:
     dockerizePip: true
+    poetryExportWithCredentials: false
 
   cache:
     prd:
@@ -342,7 +326,7 @@ resources:
               ProjectionType: ALL
         BillingMode: PAY_PER_REQUEST
 
-  RecordTable:
+    DynamoDBRecordTable:
       Type: AWS::DynamoDB::Table
       Properties:
         TableName: ${sls:stage}-${self:service}-record-table
@@ -354,7 +338,7 @@ resources:
           - AttributeName: match_id
             AttributeType: "N"
         KeySchema:
-          - AttributeName: user_id # Use user_id as namespace 
+          - AttributeName: user_id # Use user_id as namespace
             KeyType: HASH
           - AttributeName: match_id
             KeyType: RANGE

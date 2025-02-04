@@ -15,7 +15,9 @@ async def get_websocket_endpoint():
 
 
 async def check_connection(connection_id, endpoint_url):
-    async with aioboto3.Session().client("apigatewaymanagementapi", endpoint_url=endpoint_url) as client:
+    async with aioboto3.Session().client(
+        "apigatewaymanagementapi", endpoint_url=endpoint_url
+    ) as client:
         try:
             await client.get_connection(ConnectionId=connection_id)
             return True
@@ -25,9 +27,13 @@ async def check_connection(connection_id, endpoint_url):
 
 
 async def post_message_to_connection(connection_id, message_obj, endpoint_url):
-    async with aioboto3.Session().client("apigatewaymanagementapi", endpoint_url=endpoint_url) as client:
+    async with aioboto3.Session().client(
+        "apigatewaymanagementapi", endpoint_url=endpoint_url
+    ) as client:
         try:
-            await client.post_to_connection(ConnectionId=connection_id, Data=json.dumps(message_obj).encode("utf-8"))
+            await client.post_to_connection(
+                ConnectionId=connection_id, Data=json.dumps(message_obj).encode("utf-8")
+            )
         except client.exceptions.GoneException:
             print(f"Connection {connection_id} is gone.")
         except Exception as e:

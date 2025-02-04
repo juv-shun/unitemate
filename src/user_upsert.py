@@ -14,7 +14,9 @@ class UserCreationModel(BaseModel):
     namespace: str = "default"
     user_id: str
     rate: int
-    updated_unixtime: datetime = datetime.now(ZoneInfo("Asia/Tokyo")).replace(microsecond=0)
+    updated_unixtime: datetime = datetime.now(ZoneInfo("Asia/Tokyo")).replace(
+        microsecond=0
+    )
 
     @field_serializer("updated_unixtime")
     def serialize_updated_unixtime(self, updated_unixtime: datetime) -> int:
