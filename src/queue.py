@@ -26,9 +26,11 @@ class InqueueModel(BaseModel):
     role: str
     range_spread_speed: int
     range_spread_count: int
+    discord_id: str
     inqueued_unixtime: datetime = datetime.now(ZoneInfo("Asia/Tokyo")).replace(
         microsecond=0
     )
+
 
     @field_serializer("inqueued_unixtime")
     def serialize_inqueued_unixtime(self, inqueued_unixtime: datetime) -> int:

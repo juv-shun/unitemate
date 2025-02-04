@@ -1,13 +1,22 @@
+import os
 import time
 import math
 import boto3
 from datetime import datetime
 from boto3.dynamodb.conditions import Key, Attr
+import random
+import requests
+import json
+import asyncio
+import aiohttp
 
 dynamodb = boto3.resource('dynamodb')
-queue_table = dynamodb.Table('QueueTable')    # キュー情報テーブル
+queue_table = dynamodb.Table(os.environ["MATCH_QUEUE"])    # キュー情報テーブル
 user_table = dynamodb.Table('UserTable')        # ユーザー情報テーブル
 matches_table = dynamodb.Table('MatchesTable')  # マッチ結果保存テーブル（例）
+
+# TODO webhookURLはパラメータに移行したい
+WEBHOOK_URL = "https://discord.com/api/webhooks/1185019044391305226/NbOT6mnrZNHS61T5ro7iu2smxyhhSPH_tecLnWmZ91kup96-mtpdcGwvvo3kjmyzR96_"
 
 # 20秒毎に呼ばれるマッチメイク処理のエントリポイント
 def lambda_handler(event, context):
@@ -18,7 +27,15 @@ def lambda_handler(event, context):
     3. 10人グループが形成できたらマッチ成立とし、グループに入らなかったプレイヤーは
        次回のためにrange_spread_countをインクリメントする。
     """
-    waiting_users = get_waiting_users(namespace="default")
+    waiting_users = get_waiting_users(queue_table)
+
+    if len(waiting_users) < 10:
+        for p in waiting_users:
+            increment_range_spread_count(p["user_id"])
+        return {
+            "statusCode": 200,
+            "body": "No matches found. Incremented range_spread_count for all waiting players."
+        }
     
     # 各プレイヤーの最新レートと許容レンジを計算
     players = []
@@ -44,7 +61,8 @@ def lambda_handler(event, context):
             "max_rating": max_rating,
             "range_spread_speed": spread_speed,
             "range_spread_count": spread_count,
-            "inqueued_unixtime": user["inqueued_unixtime"]
+            "inqueued_unixtime": user["inqueued_unixtime"],
+            "discord_id": user["discord_id"] # キュー情報に含む
         })
     
     # 降順（高い順）にソート
@@ -54,18 +72,38 @@ def lambda_handler(event, context):
     matched_groups = form_matches_from_pool(players)
     
     if matched_groups:
-        all_matched_ids = []
-        for group in matched_groups:
-            finalize_match(group)
-            all_matched_ids.extend([p["user_id"] for p in group])
-        # 残りのプレイヤーは、今回マッチできなかったのでrange_spread_countをインクリメント
-        matched_set = set(all_matched_ids)
+        # METAアイテムから最新のマッチIDを取得（なければ初期値0）  
+        meta_item = queue_table.get_item(Key={"namespace": "default", "user_id": "#META#"}).get("Item")
+        match_id_base = int(meta_item.get("LatestMatchID", 0))
+        unused_vc = meta_item.get("UnusedVC", list(range(1, 100, 2)))
+        
+        # 各グループに対して連番のマッチIDを割り当て、マッチレコードを作成＆通知
+        for i, group in enumerate(matched_groups):
+            current_match_id = match_id_base + i + 1
+            # VCの割り当て：UnusedVCから先頭の奇数をpop（チームAのVC）、チームBはその値+1
+            if len(unused_vc) < 1:
+                raise Exception("UnusedVCが不足しています。")
+            vc_a = unused_vc.pop(0)
+            vc_b = vc_a + 1
+            finalize_match(group, current_match_id, vc_a, vc_b)
+        
+         # METAアイテムの更新：LatestMatchID と UnusedVC を１回の update_item で更新
+        new_match_id_base = match_id_base + len(matched_groups)
+        queue_table.update_item(
+            Key={"namespace": "default", "user_id": "#META#"},
+            UpdateExpression="SET LatestMatchID = :newID, UnusedVC = :vcList",
+            ExpressionAttributeValues={":newID": new_match_id_base, ":vcList": unused_vc}
+        )
+        
+        # 形成できなかったプレイヤーはrate_spread_countをインクリメント
+        used_ids = {p["user_id"] for group in matched_groups for p in group}
         for p in players:
-            if p["user_id"] not in matched_set:
+            if p["user_id"] not in used_ids:
                 increment_range_spread_count(p["user_id"])
+        
         return {
             "statusCode": 200,
-            "body": f"Matched {len(matched_groups)} groups: {all_matched_ids}"
+            "body": f"Matched {len(matched_groups)} groups. Match IDs assigned from {match_id_base+1} to {new_match_id_base}."
         }
     else:
         # 1件もマッチ成立しなかった場合は、全員のrange_spread_countをインクリメント
@@ -76,12 +114,15 @@ def lambda_handler(event, context):
             "body": "No matches found. Incremented range_spread_count for all waiting players."
         }
 
-def get_waiting_users(namespace="default"):
-    """DynamoDBからnamespaceおよびstatus="waiting"のプレイヤーを取得する（簡易版）"""
-    resp = queue_table.scan(
-        FilterExpression=Attr("status").eq("waiting") & Attr("namespace").eq(namespace)
+def get_waiting_users(queue):
+    """マッチキューからマッチング待ちのユーザを取得"""
+    response = queue.query(
+        IndexName="rate_index",
+        KeyConditionExpression=Key("namespace").eq("default"),
+        ScanIndexForward=False,
+        ProjectionExpression="user_id, rate, blocking, role, rate_spread_speed, rate_spread_count, discord_id",
     )
-    return resp.get("Items", [])
+    return response["Items"]
 
 def get_user_rating(user_id):
     """UserTableから最新のレートを取得する"""
@@ -147,30 +188,58 @@ def try_form_group(anchor, pool, used_ids):
     # 10人に満たなければ失敗
     return None
 
-def finalize_match(group):
+
+def finalize_match(group, match_id, vc_a, vc_b):
     """
-    マッチ成立した10人のグループに対して、QueueTableのstatus更新およびMatchesTableへの記録を行う。
-    将来的には、roleやblockingを考慮したチーム分割情報を保存する処理を追加可能。
+    マッチ成立した10人グループに対して：
+      1. QueueTableから各プレイヤーのエントリを削除する。
+      2. MatchesTableへマッチレコードを作成（match_idは引数で与えられる連番）。
+      3. METAアイテムからUnusedVC（奇数のみのリスト）を取得し、先頭の奇数をpopし、
+         チームAのVC番号とし、チームBのVC番号はそのVC+1とする。METAアイテムは更新する。
+      4. 10人グループはレート順にペア化し、各ペア内でランダムに割り当ててチームA・Bを決定する。
+      5. notify_discord()を呼び出してDiscordへマッチ通知を送信する。
     """
     user_ids = [p["user_id"] for p in group]
-    # QueueTable内の各プレイヤーのstatusを"matched"に更新
+    
+    # ① QueueTableから各プレイヤーのエントリを削除
     for uid in user_ids:
-        queue_table.update_item(
-            Key={"namespace": "default", "user_id": uid},
-            UpdateExpression="SET #st = :matched",
-            ExpressionAttributeNames={"#st": "status"},
-            ExpressionAttributeValues={":matched": "matched"}
-        )
-    # MatchesTableへレコード作成（match_idはタイムスタンプ例）
-    match_id = str(int(time.time() * 1000))
+        queue_table.delete_item(Key={"namespace": "default", "user_id": uid})
+
+    update_assigned_match_ids(user_ids, match_id)
+    
+    
+    # ④ チーム分け：グループは既にレート順になっている前提で、隣り合わせのペアを作り、各ペア内でランダムに割り振る
+    pairs = []
+    for i in range(0, len(group), 2):
+        pair = group[i:i+2]
+        if len(pair) < 2:
+            continue
+        random.shuffle(pair)
+        pairs.append(pair)
+    team_a_players = [pair[0] for pair in pairs]
+    team_b_players = [pair[1] for pair in pairs]
+    team_a_discord = [p.get("discord_id", "") for p in team_a_players]
+    team_b_discord = [p.get("discord_id", "") for p in team_b_players]
+
+    # ② MatchesTableへマッチレコードを作成
     matches_table.put_item(
         Item={
-            "match_id": match_id,
-            "user_ids": user_ids,
-            "timestamp": int(time.time())
-            # ★ 将来拡張: ここでチーム分割情報 (teamA, teamB) を付与する
+            "match_id": match_id,  # match_idはint型
+            "teamA_ids": [[p["user_id"], int(p["rate"])] for p in team_a_players],
+            "teamB_ids": [[p["user_id"], int(p["rate"])] for p in team_b_players],
+            "timestamp": int(time.time()),
+            "status": "matched",
+            "confirmations": [],
+            "penalty_player": [],
+            "vc_A": vc_a
         }
     )
+
+    
+    # ⑤ Discordへ通知送信
+    asyncio.run(notify_discord(match_id, vc_a, vc_b, team_a_discord, team_b_discord))
+
+
 
 def increment_range_spread_count(user_id):
     """マッチに入らなかったプレイヤーのrange_spread_countをインクリメントする"""
@@ -181,3 +250,39 @@ def increment_range_spread_count(user_id):
         ExpressionAttributeNames={"#c": "range_spread_count"},
         ExpressionAttributeValues={":inc": 1}
     )
+
+# 各プレイヤーの assigned_match_id を新しい match_id に更新する処理
+def update_assigned_match_ids(user_ids, match_id):
+    for uid in user_ids:
+        user_table.update_item(
+            Key={"user_id": uid},
+            UpdateExpression="SET assigned_match_id = :m",
+            ExpressionAttributeValues={":m": match_id}
+        )
+
+async def notify_discord(match_id, vc_a, vc_b, team_a, team_b):
+    """
+    DiscordのWebhookを用いてマッチ通知を送信する関数。
+    """
+    # プレイヤーIDリストをスペース区切りで連結
+    team_a_str = " ".join(team_a)
+    team_b_str = " ".join(team_b)
+    
+    content = (
+        f"**VC有りバトルでマッチしました**\r"
+        f"先攻チーム VC{vc_a}\r {team_a_str}\r\r"
+        f"後攻チーム VC{vc_b}\r {team_b_str}\r\r"
+        f"*サイト上のタイマー以内にロビーに集合してください。集まらない場合、試合を無効にしてください。*\r"
+        f"ID: ||{match_id}||\r"
+    )
+    
+    payload = {"content": content}
+    headers = {"Content-Type": "application/json"}
+    async with aiohttp.ClientSession() as session:
+        async with session.post(WEBHOOK_URL, json=payload, headers=headers) as response:
+            if response.status == 204:
+                print("Discord通知送信成功")
+            else:
+                text = await response.text()
+                print(f"Discord通知送信失敗: {response.status}")
+                print("レスポンス:", text)
