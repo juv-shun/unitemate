@@ -71,7 +71,7 @@ functions:
   # インキュー ########################
   # キューにインキューするAPI
   inqueue:
-    handler: src/queue.inqueue
+    handler: src/db_process_queue.send_inqueue_message
     events:
       - http:
           path: v1/queue/_inqueue
@@ -80,7 +80,7 @@ functions:
 
   # キューからデキューするAPI
   dequeue:
-    handler: src/queue.dequeue
+    handler: src/db_process_queue.send_dequeue_message
     events:
       - http:
           path: v1/queue/_dequeue
@@ -88,7 +88,7 @@ functions:
           private: true
 
   queue_info:
-    handler: src/queue.get_info
+    handler: src/match_queue.get_info
     events:
       - http:
           path: v1/queue
@@ -97,72 +97,31 @@ functions:
 
   # マッチメイク ########################
   match_make: # マッチメイクするバッチ
-    handler: src/match_make.handle
+    handler: src/db_process_queue.send_matchmake_message
     events:
       - schedule:
           name: ${sls:stage}-${self:service}-match-make-schedule
           description: Schedule for match making
           rate: cron(*/5 * * * ? *)
           enabled: ${self:custom.cache.${sls:stage}.schedule_enabled}
-    environment:
-      LAMBDA_FUNC_NOTIFY: ${self:service}-${sls:stage}-notify_users
-      BUBBLE_API_ASSIGN_MATCH: ${param:bubble_assign_match_id}
-      BUBBLE_API_QUEUE_COUNT: ${param:bubble_queue_count}
-      BUBBLE_API_NOTIFY_DISCORD: ${param:bubble_notify_discord}
-      RECORD_TABLE: !Ref DynamoDBRecordTable  # 追加
-      DUMMY: ${param:dummy_account}
     timeout: 15
-
-  notify_users: # マッチメイク時、ユーザーをマッチにアサインする箇所を同期処理で行うために分割
-    handler: src/notify_users.handle  # notify_users 関数のエントリーポイント
-    timeout: 10  # タイムアウトを設定
-    memorySize: 128  # メモリサイズを調整
-    environment:
-      BUBBLE_API_ASSIGN_MATCH: ${param:bubble_assign_match_id}
-      RECORD_TABLE: !Ref DynamoDBRecordTable
-    events:
-      - http:
-          path: v1/notify_users
-          method: post
-          private: true  #  API キー保護
 
   # 結果報告、集計 ########################
   match_report: # 試合終了後の試合結果を報告するAPI
-    handler: src/match_report.handle
+    handler: src/db_process_queue.send_match_report_message
     events:
       - http:
           path: v1/match/_report
           method: post
           private: true
-    environment:
-      LAMBDA_FUNC_NAME: ${self:service}-${sls:stage}-enqueue_aggregation
 
-  process_report:
-    handler: src/match_report.process_report_queue
+  match_info: # ユーザがアサインされているマッチ情報を返すAPI
+    handler: src/match_report.get_info
     events:
-      - sqs:
-          arn:
-            Fn::GetAtt:
-              - ReportQueue
-              - Arn
-    environment:
-      LAMBDA_FUNC_NAME: ${self:service}-${sls:stage}-match_judge
-
-  match_judge:
-    handler: src/match_judge.handle
-    environment:
-      AGGREGATION_QUEUE:
-        Ref: AggregationQueue
-
-  process_aggregation_queue:
-    handler: src/match_judge.process_queue
-    events:
-      - sqs:
-          arn:
-            Fn::GetAtt:
-              - AggregationQueue
-              - Arn
-    timeout: 15
+      - http:
+          path: v1/match/{user_id}
+          method: get
+          private: true
 
   # ユーザー情報 ########################
   user_upsert: # ユーザを作成・更新するAPI　未使用
