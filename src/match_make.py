@@ -249,6 +249,7 @@ def finalize_match(group, match_id, vc_a, vc_b):
             "status": "matched",
             "user_reports": [],
             "penalty_player": [],
+            "judge_timeout_count": 0,
             "vc_A": int(vc_a),
             "vc_B": int(vc_a + 1)
         }

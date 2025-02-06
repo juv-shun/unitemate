@@ -100,9 +100,6 @@ def get_info(event, _):
         
         # ユーザーデータが存在しない場合
         if "Item" not in user_response:
-            user_data_response = {
-                "match_id": 0
-            }
             return default_return
         else:
             # ユーザーデータを取得

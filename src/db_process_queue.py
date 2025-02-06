@@ -19,7 +19,7 @@ logger.setLevel(logging.INFO)
 
 # boto3クライアントの初期化
 sqs = boto3.client('sqs')
-# FIFOキューのURL。環境変数で管理（例: "https://sqs.ap-northeast-1.amazonaws.com/123456789012/your-queue.fifo"）
+# FIFOキューのURL。環境変数で管理
 QUEUE_URL = os.environ["AGGREGATION_QUEUE"]
 
 def db_process_queue_handler(event, context):
@@ -68,7 +68,7 @@ def db_process_queue_handler(event, context):
 
 
 
-def send_sqs_message(action: str, payload: dict, group_id: str = "ProcessQueue"):
+def send_sqs_message(action: str, payload: dict, group_id: str = "ProcessQueue", delay: int = 0):
     """
     SQS FIFOキューにメッセージを送信する共通関数。
     
@@ -85,7 +85,8 @@ def send_sqs_message(action: str, payload: dict, group_id: str = "ProcessQueue")
         QueueUrl=QUEUE_URL,
         MessageBody=message_body,
         MessageGroupId=group_id,
-        MessageDeduplicationId=str(uuid.uuid4())
+        DelaySeconds=delay,
+        MessageDeduplicationId=str(uuid.uuid4()),
     )
     print(f"Enqueued {action} with MessageId: {response['MessageId']}")
     return response
@@ -114,8 +115,8 @@ def send_match_report_message(event, _):
     """
     return send_sqs_message("match_report", event)
 
-def send_process_result_message(event, _):
+def send_process_result_message(event, _, delay=0):
     """
     試合結果処理要求のメッセージを送信する。
     """
-    return send_sqs_message("process_result", event)
+    return send_sqs_message("process_result", event, delay=delay)
