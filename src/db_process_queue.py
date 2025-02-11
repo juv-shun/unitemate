@@ -6,33 +6,35 @@ import json
 import uuid
 import boto3
 
-# Šeˆ—‚ğs‚¤ƒ‚ƒWƒ…[ƒ‹‚ÌƒCƒ“ƒ|[ƒg
-from match_queue import inqueue, dequeue
-from src.match_make import handle as match_make_handler
-from src.match_report import handle as match_report_handler
-from src.match_judge import handle as match_judge_handler
+# å„å‡¦ç†ã‚’è¡Œã†ãƒ¢ã‚¸ãƒ¥ãƒ¼ãƒ«ã®ã‚¤ãƒ³ãƒãƒ¼ãƒˆ
+from .match_queue import inqueue, dequeue
+from .match_make import handle as match_make_handler
+from .match_report import report as match_report_handler
+from .match_judge import judge_timeout as match_judge_handler
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 
 
-# boto3ƒNƒ‰ƒCƒAƒ“ƒg‚Ì‰Šú‰»
+# boto3ã‚¯ãƒ©ã‚¤ã‚¢ãƒ³ãƒˆã®åˆæœŸåŒ–
 sqs = boto3.client('sqs')
-# FIFOƒLƒ…[‚ÌURLBŠÂ‹«•Ï”‚ÅŠÇ—
+# FIFOã‚­ãƒ¥ãƒ¼ã®URLã€‚ç’°å¢ƒå¤‰æ•°ã§ç®¡ç†
 QUEUE_URL = os.environ["AGGREGATION_QUEUE"]
+
+
 
 def db_process_queue_handler(event, context):
     """
-    SQS‚ÌƒƒbƒZ[ƒW‚ğó‚¯æ‚èAƒƒbƒZ[ƒW“à‚Ì"action"‚É‰‚¶‚½ˆ—‚ğŒÄ‚Ño‚·“‡ƒvƒƒZƒX—p‚Ìƒnƒ“ƒhƒ‰[B
+    SQSã®ãƒ¡ãƒƒã‚»ãƒ¼ã‚¸ã‚’å—ã‘å–ã‚Šã€ãƒ¡ãƒƒã‚»ãƒ¼ã‚¸å†…ã®"action"ã«å¿œã˜ãŸå‡¦ç†ã‚’å‘¼ã³å‡ºã™çµ±åˆãƒ—ãƒ­ã‚»ã‚¹ç”¨ã®ãƒãƒ³ãƒ‰ãƒ©ãƒ¼ã€‚
     
-    ƒƒbƒZ[ƒW—á:
+    ãƒ¡ãƒƒã‚»ãƒ¼ã‚¸ä¾‹:
     {
         "action": "match_make",    # enqueue, dequeue, queue_info, match_make,
                                    # notify_users, match_report, process_report,
                                    # match_judge, process_aggregation, user_upsert,
-                                   # user_delete, user_info, get_ranking ‚È‚Ç
-        "payload": { ... }         # Šeˆ—‚É•K—v‚Èƒpƒ‰ƒ[ƒ^
+                                   # user_delete, user_info, get_ranking ãªã©
+        "payload": { ... }         # å„å‡¦ç†ã«å¿…è¦ãªãƒ‘ãƒ©ãƒ¡ãƒ¼ã‚¿
     }
     """
     records = event.get("Records", [])
@@ -41,15 +43,15 @@ def db_process_queue_handler(event, context):
             message_body = record["body"]
             message = json.loads(message_body)
         except Exception as e:
-            logger.error(f"ƒƒbƒZ[ƒW‚Ìƒp[ƒXƒGƒ‰[: {e}")
+            logger.error(f"ãƒ¡ãƒƒã‚»ãƒ¼ã‚¸ã®ãƒ‘ãƒ¼ã‚¹ã‚¨ãƒ©ãƒ¼: {e}")
             continue
 
         action = message.get("action")
         payload = message.get("payload", {})
-        logger.info(f"óMƒAƒNƒVƒ‡ƒ“: {action} / payload: {payload}")
+        logger.info(f"å—ä¿¡ã‚¢ã‚¯ã‚·ãƒ§ãƒ³: {action} / payload: {payload}")
 
         try:
-            if action == "enqueue":
+            if action == "inqueue":
                 inqueue(payload, context)
             elif action == "dequeue":
                 dequeue(payload, context)
@@ -58,24 +60,25 @@ def db_process_queue_handler(event, context):
             elif action == "match_report":
                 match_report_handler(payload, context)
             elif action == "match_judge":
+                print('make judge')
                 match_judge_handler(payload, context)
             else:
-                logger.error(f"•s–¾‚ÈƒAƒNƒVƒ‡ƒ“: {action}")
+                logger.error(f"ä¸æ˜ãªã‚¢ã‚¯ã‚·ãƒ§ãƒ³: {action}")
         except Exception as ex:
-            logger.error(f"ƒAƒNƒVƒ‡ƒ“ {action} ‚Ìˆ—’†‚ÉƒGƒ‰[”­¶: {ex}")
+            logger.error(f"ã‚¢ã‚¯ã‚·ãƒ§ãƒ³ {action} ã®å‡¦ç†ä¸­ã«ã‚¨ãƒ©ãƒ¼ç™ºç”Ÿ: {ex}")
 
-    return {"statusCode": 200, "body": "‚·‚×‚Ä‚ÌƒƒbƒZ[ƒW‚ğ³í‚Éˆ—‚µ‚Ü‚µ‚½B"}
+    return {"statusCode": 200, "body": "ã™ã¹ã¦ã®ãƒ¡ãƒƒã‚»ãƒ¼ã‚¸ã‚’æ­£å¸¸ã«å‡¦ç†ã—ã¾ã—ãŸã€‚"}
 
 
 
-def send_sqs_message(action: str, payload: dict, group_id: str = "ProcessQueue", delay: int = 0):
+def send_sqs_message(action: str, payload: dict, group_id: str = "ProcessQueue"):
     """
-    SQS FIFOƒLƒ…[‚ÉƒƒbƒZ[ƒW‚ğ‘—M‚·‚é‹¤’ÊŠÖ”B
+    SQS FIFOã‚­ãƒ¥ãƒ¼ã«ãƒ¡ãƒƒã‚»ãƒ¼ã‚¸ã‚’é€ä¿¡ã™ã‚‹å…±é€šé–¢æ•°ã€‚
     
-    :param action: "inqueue", "dequeue", "match_make", "match_report", "process_result", "update_ranking" “™‚Ì‘€ì–¼
-    :param payload: Šeˆ—‚É•K—v‚Èƒpƒ‰ƒ[ƒ^‚ğŠi”[‚µ‚½«‘
-    :param group_id: FIFOƒLƒ…[‚ÌMessageGroupIdi‘SƒƒbƒZ[ƒW‚ğ1ƒOƒ‹[ƒv‚É‚Ü‚Æ‚ß‚éê‡‚ÍŒÅ’è’lj
-    :return: SQS‚Ì‘—MƒŒƒXƒ|ƒ“ƒX
+    :param action: "inqueue", "dequeue", "match_make", "match_report", "process_result", "update_ranking" ç­‰ã®æ“ä½œå
+    :param payload: å„å‡¦ç†ã«å¿…è¦ãªãƒ‘ãƒ©ãƒ¡ãƒ¼ã‚¿ã‚’æ ¼ç´ã—ãŸè¾æ›¸
+    :param group_id: FIFOã‚­ãƒ¥ãƒ¼ã®MessageGroupIdï¼ˆå…¨ãƒ¡ãƒƒã‚»ãƒ¼ã‚¸ã‚’1ã‚°ãƒ«ãƒ¼ãƒ—ã«ã¾ã¨ã‚ã‚‹å ´åˆã¯å›ºå®šå€¤ï¼‰
+    :return: SQSã®é€ä¿¡ãƒ¬ã‚¹ãƒãƒ³ã‚¹
     """
     message_body = json.dumps({
         "action": action,
@@ -85,38 +88,41 @@ def send_sqs_message(action: str, payload: dict, group_id: str = "ProcessQueue",
         QueueUrl=QUEUE_URL,
         MessageBody=message_body,
         MessageGroupId=group_id,
-        DelaySeconds=delay,
         MessageDeduplicationId=str(uuid.uuid4()),
     )
     print(f"Enqueued {action} with MessageId: {response['MessageId']}")
-    return response
+   
+    return {
+        "statusCode": 200,
+        "body": json.dumps({
+            "message": "Message enqueued successfully",
+            "messageId": response["MessageId"],
+        })
+    }
 
 def send_inqueue_message(event, _):
     """
-    ƒCƒ“ƒLƒ…[—v‹‚ÌƒƒbƒZ[ƒW‚ğ‘—M‚·‚éB
+    ã‚¤ãƒ³ã‚­ãƒ¥ãƒ¼è¦æ±‚ã®ãƒ¡ãƒƒã‚»ãƒ¼ã‚¸ã‚’é€ä¿¡ã™ã‚‹ã€‚
     """
+    print("inqueue called")
     return send_sqs_message("inqueue", event)
 
 def send_dequeue_message(event, _):
     """
-    ƒfƒLƒ…[—v‹‚ÌƒƒbƒZ[ƒW‚ğ‘—M‚·‚éB
+    ãƒ‡ã‚­ãƒ¥ãƒ¼è¦æ±‚ã®ãƒ¡ãƒƒã‚»ãƒ¼ã‚¸ã‚’é€ä¿¡ã™ã‚‹ã€‚
     """
     return send_sqs_message("dequeue", event)
 
 def send_matchmake_message(event, _):
     """
-    ƒ}ƒbƒ`ƒƒCƒN—v‹‚ÌƒƒbƒZ[ƒW‚ğ‘—M‚·‚éB
+    ãƒãƒƒãƒãƒ¡ã‚¤ã‚¯è¦æ±‚ã®ãƒ¡ãƒƒã‚»ãƒ¼ã‚¸ã‚’é€ä¿¡ã™ã‚‹ã€‚
     """
+    print("match make is called")
     return send_sqs_message("match_make", event)
 
 def send_match_report_message(event, _):
     """
-    ‡Œ‹‰Ê•ñ—v‹‚ÌƒƒbƒZ[ƒW‚ğ‘—M‚·‚éB
+    è©¦åˆçµæœå ±å‘Šè¦æ±‚ã®ãƒ¡ãƒƒã‚»ãƒ¼ã‚¸ã‚’é€ä¿¡ã™ã‚‹ã€‚
     """
     return send_sqs_message("match_report", event)
 
-def send_process_result_message(event, _, delay=0):
-    """
-    ‡Œ‹‰Êˆ——v‹‚ÌƒƒbƒZ[ƒW‚ğ‘—M‚·‚éB
-    """
-    return send_sqs_message("process_result", event, delay=delay)

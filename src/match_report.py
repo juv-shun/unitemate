@@ -4,7 +4,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from decimal import Decimal
 import boto3
-from pydantic import BaseModel, ValidationError, field_serializer
+from pydantic import BaseModel, Field, ValidationError, field_serializer
 
 
 
@@ -27,13 +27,12 @@ class MatchReportModel(BaseModel):
     picked_pokemon: str
     pokemon_move1: str
     pokemon_move2: str
-    report_unixtime: datetime = datetime.now(ZoneInfo("Asia/Tokyo")).replace(
-        microsecond=0
-    )
+    report_unixtime: datetime = Field(default_factory=lambda: datetime.now(ZoneInfo("Asia/Tokyo")).replace(microsecond=0))
 
-    @field_serializer("inqueued_unixtime")
-    def serialize_inqueued_unixtime(self, inqueued_unixtime: datetime) -> int:
-        return int(inqueued_unixtime.timestamp())
+
+    @field_serializer("report_unixtime")
+    def serialize_report_unixtime(self, report_unixtime: datetime) -> int:
+        return int(report_unixtime.timestamp())
     
     def keys_dict(self):
         return {"namespace": self.namespace, "match_id": self.match_id}
@@ -47,7 +46,7 @@ class MatchReportModel(BaseModel):
             "picked_pokemon": self.picked_pokemon,
             "pokemon_move1": self.pokemon_move1,
             "pokemon_move2": self.pokemon_move2,
-            "report_unixtime": self.serialize_inqueued_unixtime(self.report_unixtime),
+            "report_unixtime": self.serialize_report_unixtime(self.report_unixtime),
         }
 
 class DecimalEncoder(json.JSONEncoder):
@@ -79,6 +78,12 @@ def report(event, _):
     )
 
     # TODO レポートの数が足りているならジャッジ?
+
+    user_table.update_item(
+        Key={"namespace": "default", "user_id": model.user_id},
+        UpdateExpression="SET assigned_match_id = :zero",
+        ExpressionAttributeValues={":zero": 0}
+    )
     
 
     return {"statusCode": 200, "body": None}
@@ -88,7 +93,15 @@ def get_info(event, _):
     default_return = {
                     "statusCode": 200,
                     "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},  
-                    "body": json.dumps({"match_id": 0}, cls=DecimalEncoder),
+                    "body": json.dumps({"match_id": 0, "team_A": [],
+                                "team_B": [],
+                                "team_A_rate": [],
+                                "team_B_rate": [],
+                                "team_A_best": [],
+                                "team_B_best": [],
+                                "vc_A": 0,
+                                "vc_B": 0,
+                                "matched_unix_time": 0,}, cls=DecimalEncoder),
                 }
     try:
         # pathParameters から user_id を取得
@@ -104,7 +117,7 @@ def get_info(event, _):
         else:
             # ユーザーデータを取得
             user_item = user_response["Item"]
-            match_id = user_item.get("assinged_match", 0)
+            match_id = user_item.get("assigned_match_id", 0)
             # assigned_matchが0の場合
             if match_id == 0:
                 return default_return
@@ -115,9 +128,16 @@ def get_info(event, _):
                     return default_return
                 else:
                     match_item = match_data["Item"]
+                    teamA = match_item.get("team_A")
+                    teamB = match_item.get("team_B")
                     match_data_response = {
-                                "team_A": match_item.get("team_A"),
-                                "team_B": match_item.get("team_B"),
+                                "match_id": match_id,
+                                "team_A": [p[0] for p in teamA],
+                                "team_B": [p[0] for p in teamB],
+                                "team_A_rate": [p[1] for p in teamA],
+                                "team_B_rate": [p[1] for p in teamB],
+                                "team_A_best": [p[2] for p in teamA],
+                                "team_B_best": [p[2] for p in teamB],
                                 "vc_A": match_item.get("vc_A"),
                                 "vc_B": match_item.get("vc_B"),
                                 "matched_unix_time": int(match_item.get("matched_unix_time", 0)),

@@ -4,11 +4,11 @@ import boto3
 from boto3.dynamodb.conditions import Key
 from decimal import Decimal
 
-# ŠÂ‹«•Ï”‚©‚ç DynamoDB ƒe[ƒuƒ‹–¼‚ğæ“¾
+# ç’°å¢ƒå¤‰æ•°ã‹ã‚‰ DynamoDB ãƒ†ãƒ¼ãƒ–ãƒ«åã‚’å–å¾—
 USER_TABLE = os.environ["USER_TABLE"]
 RECORD_TABLE = os.environ["RECORD_TABLE"]
 
-# DynamoDB ƒŠƒ\[ƒX‚Æƒe[ƒuƒ‹‚Ì‰Šú‰»
+# DynamoDB ãƒªã‚½ãƒ¼ã‚¹ã¨ãƒ†ãƒ¼ãƒ–ãƒ«ã®åˆæœŸåŒ–
 dynamodb = boto3.resource("dynamodb")
 user_table = dynamodb.Table(USER_TABLE)
 record_table = dynamodb.Table(RECORD_TABLE)
@@ -17,78 +17,84 @@ record_table = dynamodb.Table(RECORD_TABLE)
 class DecimalEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, Decimal):
-            return int(obj)  # •K—v‚É‰‚¶‚Ä float(obj) ‚É•ÏX‰Â”\
+            return int(obj)  # å¿…è¦ã«å¿œã˜ã¦ float(obj) ã«å¤‰æ›´å¯èƒ½
         return super(DecimalEncoder, self).default(obj)
 
 
-def handler(event, context):
+def handle(event, context):
     """
-    GET /users/{user_id} ‚ÌƒŠƒNƒGƒXƒg‚ğˆ—‚µA‘Î‰‚·‚éƒvƒŒƒCƒ„[ƒf[ƒ^‚ÆÅV‚Ì50Œ‚Ì‡ƒŒƒR[ƒh‚ğ•Ô‚·B
+    GET /users/{user_id} ã®ãƒªã‚¯ã‚¨ã‚¹ãƒˆã‚’å‡¦ç†ã—ã€å¯¾å¿œã™ã‚‹ãƒ—ãƒ¬ã‚¤ãƒ¤ãƒ¼ãƒ‡ãƒ¼ã‚¿ã‚’è¿”ã™ã€‚
     """
     try:
-        # pathParameters ‚©‚ç user_id ‚ğæ“¾
+        # pathParameters ã‹ã‚‰ user_id ã‚’å–å¾—
         user_id = event["pathParameters"]["user_id"]
         print(f"Received request for user_id: {user_id}")
 
-        # DynamoDB ‚©‚ç user_id ‚É‘Î‰‚·‚éƒ†[ƒU[ƒf[ƒ^‚ğæ“¾
+        # DynamoDB ã‹ã‚‰ user_id ã«å¯¾å¿œã™ã‚‹ãƒ¦ãƒ¼ã‚¶ãƒ¼ãƒ‡ãƒ¼ã‚¿ã‚’å–å¾—
         user_response = user_table.get_item(Key={"namespace": "default", "user_id": user_id})
 
-        # ƒ†[ƒU[ƒf[ƒ^‚ª‘¶İ‚µ‚È‚¢ê‡
+        # ãƒ¦ãƒ¼ã‚¶ãƒ¼ãƒ‡ãƒ¼ã‚¿ãŒå­˜åœ¨ã—ãªã„å ´åˆ
         if "Item" not in user_response:
-            # ƒvƒŒƒCƒ„[ƒf[ƒ^‚ª–³‚¢ê‡AV‹Kì¬
+            # ãƒ—ãƒ¬ã‚¤ãƒ¤ãƒ¼ãƒ‡ãƒ¼ã‚¿ãŒç„¡ã„å ´åˆã€æ–°è¦ä½œæˆ
             Item = {
                 "namespace": "default",
                 "user_id": user_id,
-                "pokepoke_num_record": 0,
-                "pokepoke_num_win": 0,
+                "unitemate_num_record": 0,
+                "unitemate_num_win": 0,
                 "rate": 1500,
-                "pokepoke_max_rate": 1500,
-                # "pokepoke_records": [],
-                "pokepoke_last_rate_delta": 0,
-                "pokepoke_winrate": 0,
-                "pokepoke_last_match_id": 0,
-                "ranking_order": 9999,
+                "unitemate_max_rate": 1500,
+                "unitemate_last_rate_delta": 0,
+                "unitemate_winrate": 0,
+                "unitemate_last_match_id": 0,
+                "assigned_match_id": 0,
             }
             user_table.put_item(Item=Item)
 
             user_item = Item
+        elif "rate" not in user_response["Item"]:
+            # ãƒ—ãƒ¬ã‚¤ãƒ¤ãƒ¼ãƒ‡ãƒ¼ã‚¿ãŒç„¡ã„å ´åˆã€æ–°è¦ä½œæˆ
+            user_table.update_item(
+                Key={"namespace": "default", "user_id": user_id},
+                UpdateExpression="""
+                    SET unitemate_num_record = :nr,
+                        unitemate_num_win = :nw,
+                        rate = :rt,
+                        unitemate_max_rate = :mr,
+                        unitemate_last_rate_delta = :dr,
+                        unitemate_winrate = :wr,
+                        unitemate_last_match_id = :lm
+                        assigned_match_id = :am
+                """,
+                ExpressionAttributeValues={
+                    ":nr": 0,
+                    ":nw": 0,
+                    ":rt": 1500,
+                    ":mr": 1500,
+                    ":dr": 0,
+                    ":wr": 0,
+                    ":lm": 0,
+                    ":am": 0,
+                },)
 
+            user_item = user_response["Item"]
         else:
-            # ƒ†[ƒU[ƒf[ƒ^‚ğæ“¾
+            # ãƒ¦ãƒ¼ã‚¶ãƒ¼ãƒ‡ãƒ¼ã‚¿ã‚’å–å¾—
             user_item = user_response["Item"]
 
         print(f"User data retrieved: {user_item}")
 
-        # ÅV‚Ì50Œ‚Ì‡ƒf[ƒ^‚ğæ“¾
-        latest_matches = []
-        try:
-            match_response = record_table.query(
-                IndexName="started_date_index",  # GSI‚ğw’è
-                KeyConditionExpression=Key("user_id").eq(user_id),
-                ScanIndexForward=False,  # ~‡iÅV‡j
-                Limit=50,
-                ProjectionExpression="used_pokemon, match_id, rate_delta, started_date, winlose, team_A, team_B",
-            )
-            latest_matches = match_response.get("Items", [])
 
-            print(f"Retrieved {len(latest_matches)} latest matches for user_id {user_id}")
-        except Exception as e:
-            print(f"Error fetching match records: {str(e)}")
-            # ‡ƒf[ƒ^æ“¾¸”s‚àƒ†[ƒU[ƒf[ƒ^‚Í•Ô‚·
-            latest_matches = []
-
-        # •K—v‚Èƒf[ƒ^‚Ì‚İ‚ğ•Ô‚·
+        # å¿…è¦ãªãƒ‡ãƒ¼ã‚¿ã®ã¿ã‚’è¿”ã™
         user_data_response = {
             "user_id": user_item.get("user_id"),
-            "num_record": int(user_item.get("num_record", 0)),
-            "num_win": int(user_item.get("num_win", 0)),
+            "unitemate_num_record": int(user_item.get("unitemate_num_record", 0)),
+            "unitemate_num_win": int(user_item.get("unitemate_num_win", 0)),
             "rate": int(user_item.get("rate", 1500)),
-            "max_rate": int(user_item.get("max_rate", 1500)),
-            "winrate": int(user_item.get("winrate", 0)),
-            "last_rate_delta": int(user_item.get("last_rate_delta", 0)),
-            "latest_matches": latest_matches,  # ÅV‚Ì50Œ‚Ì‡ƒf[ƒ^‚ğ’Ç‰Á
+            "unitemate_max_rate": int(user_item.get("unitemate_max_rate", 1500)),
+            "unitemate_winrate": int(user_item.get("unitemate_winrate", 0)),
+            "unitemate_last_rate_delta": int(user_item.get("unitemate_last_rate_delta", 0)),
         }
-        # ƒVƒŠƒAƒ‰ƒCƒY‘O‚Éƒf[ƒ^‚ÌŒ^‚ğƒƒOo—Í
+        # ã‚·ãƒªã‚¢ãƒ©ã‚¤ã‚ºå‰ã«ãƒ‡ãƒ¼ã‚¿ã®å‹ã‚’ãƒ­ã‚°å‡ºåŠ›
         print("user_data_response types:")
         for key, value in user_data_response.items():
             if isinstance(value, list):
@@ -100,7 +106,7 @@ def handler(event, context):
 
         return {
             "statusCode": 200,
-            "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},  # •K—v‚É‰‚¶‚Ä’²®
+            "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},  # å¿…è¦ã«å¿œã˜ã¦èª¿æ•´
             "body": json.dumps(user_data_response, cls=DecimalEncoder),
         }
 
@@ -108,6 +114,50 @@ def handler(event, context):
         print(f"Error fetching user data: {str(e)}")
         return {
             "statusCode": 500,
-            "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},  # •K—v‚É‰‚¶‚Ä’²®
+            "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},  # å¿…è¦ã«å¿œã˜ã¦èª¿æ•´
+            "body": json.dumps({"message": "Internal server error."}),
+        }
+    
+
+    
+def get_records(event, context):
+    try:
+        # pathParameters ã‹ã‚‰ user_id ã‚’å–å¾—
+        user_id = event["pathParameters"]["user_id"]
+        print(f"Received request for user_id: {user_id}")
+        # æœ€æ–°ã®50ä»¶ã®è©¦åˆãƒ‡ãƒ¼ã‚¿ã‚’å–å¾—
+        latest_matches = []
+        try:
+            match_response = record_table.query(
+                IndexName="started_date_index",  # GSIã‚’æŒ‡å®š
+                KeyConditionExpression=Key("user_id").eq(user_id),
+                ScanIndexForward=False,  # é™é †ï¼ˆæœ€æ–°é †ï¼‰
+                Limit=50,
+                ProjectionExpression="pokemon, match_id, rate_delta, started_date, winlose, team_A, team_B",
+            )
+            latest_matches = match_response.get("Items", [])
+
+            print(f"Retrieved {len(latest_matches)} latest matches for user_id {user_id}")
+        except Exception as e:
+            print(f"Error fetching match records: {str(e)}")
+            # è©¦åˆãƒ‡ãƒ¼ã‚¿å–å¾—å¤±æ•—æ™‚ã‚‚ãƒ¦ãƒ¼ã‚¶ãƒ¼ãƒ‡ãƒ¼ã‚¿ã¯è¿”ã™
+            latest_matches = []
+
+        # å¿…è¦ãªãƒ‡ãƒ¼ã‚¿ã®ã¿ã‚’è¿”ã™
+        user_records_response = {
+            "latest_matches": latest_matches,  # æœ€æ–°ã®50ä»¶ã®è©¦åˆãƒ‡ãƒ¼ã‚¿ã‚’è¿½åŠ 
+        }
+       
+        return {
+            "statusCode": 200,
+            "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},  
+            "body": json.dumps(user_records_response, cls=DecimalEncoder),
+        }
+
+    except Exception as e:
+        print(f"Error fetching user data: {str(e)}")
+        return {
+            "statusCode": 500,
+            "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"}, 
             "body": json.dumps({"message": "Internal server error."}),
         }

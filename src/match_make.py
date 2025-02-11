@@ -9,11 +9,10 @@ import boto3
 import requests
 from boto3.dynamodb.conditions import Attr, Key
 
-from .ws_helper import broadcast_last_queue_info
+from .ws_helper import broadcast_queue_count
 import asyncio
 import math
 import aiohttp
-
 JST = timezone(timedelta(hours=+9), "JST")
 
 dynamodb = boto3.resource("dynamodb")
@@ -23,122 +22,212 @@ user_table = dynamodb.Table(os.environ["USER_TABLE"])
 connection_table = dynamodb.Table(os.environ["CONNECTION_TABLE"])
 
 
-def update_bubble_queue_via_ws(queue_count):
+# TODO webhookURLはパラメータに移行したい
+WEBHOOK_URL = "https://discord.com/api/webhooks/1185019044391305226/NbOT6mnrZNHS61T5ro7iu2smxyhhSPH_tecLnWmZ91kup96-mtpdcGwvvo3kjmyzR96_"
+BUBBLE_ASSIGN_MATCH_URL = os.environ["BUBBLE_ASSIGN_MATCH_URL"]
+BUBBLE_API_KEY = "da60b1aedd486065e1d3b8d0a9a9e49d"
+
+headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {BUBBLE_API_KEY}"
+    }
+
+def acquire_lock():
+    """
+    lock フィールドを無条件に 1 に更新する。
+    すでに lock=1 でも上書きされるのでご注意ください。
+    """
+    try:
+        queue_table.update_item(
+            Key={"namespace": "default", "user_id": "#META#"},
+            UpdateExpression="SET #lk = :locked",
+            ExpressionAttributeNames={"#lk": "lock"},
+            ExpressionAttributeValues={":locked": 1},
+        )
+        print("ロックを(強制的に)セットしました (lock=1)")
+    except Exception as e:
+        print(f"ロック設定エラー: {e}")
+
+def release_lock():
+    """
+    lock を無条件に 0 に更新する。
+    """
+    try:
+        queue_table.update_item(
+            Key={"namespace": "default", "user_id": "#META#"},
+            UpdateExpression="SET #lk = :unlock",
+            ExpressionAttributeNames={"#lk": "lock"},
+            ExpressionAttributeValues={":unlock": 0},
+        )
+        print("ロックを解放しました (lock=0)")
+    except Exception as e:
+        print(f"ロック解放エラー: {e}")
+
+def update_queue_meta(players):
+    try:
+        new_rate_list = []
+        new_range_list = []
+        print("update_queue_meta p:",players)
+        for player in players:
+            rating = player["rate"] 
+            spread_count = player["range_spread_count"]
+            spread_speed = player["range_spread_speed"]
+            new_rate_list.append(rating)
+            new_range_list.append(50 + spread_speed * spread_count)
+
+        # METAデータに rate_list, range_list を一度に更新
+        queue_table.update_item(
+            Key={"namespace": "default", "user_id": "#META#"},
+            UpdateExpression="SET rate_list = :rl, range_list = :rnl",
+            ExpressionAttributeValues={
+                ":rl": new_rate_list,
+                ":rnl": new_range_list,
+            })
+    except Exception as e:
+        print("error at update_queue_meta", e)
+        
+
+def update_bubble_queue_via_ws():
+    # 接続している全ユーザーの connection_id を取得
     try:
         connection_resp = connection_table.scan(ProjectionExpression="connection_id")
         connection_ids = [
             item["connection_id"] for item in connection_resp.get("Items", [])
         ]
-        asyncio.run(broadcast_last_queue_info(queue_count, connection_ids))
+        asyncio.run(broadcast_queue_count(connection_ids))
     except Exception as e:
-        pass
-
-# TODO webhookURLはパラメータに移行したい
-WEBHOOK_URL = "https://discord.com/api/webhooks/1185019044391305226/NbOT6mnrZNHS61T5ro7iu2smxyhhSPH_tecLnWmZ91kup96-mtpdcGwvvo3kjmyzR96_"
+        print("error at update_bubble_queue_via_ws", e)
 
 # 20秒毎に呼ばれるマッチメイク処理のエントリポイント
 def handle(event, context):
     """
-    1. QueueTableから"waiting"状態のプレイヤーを取得し、
+    1. QueueTableからプレイヤーを取得し、
        ユーザーごとの最新レートと許容レンジを計算する。
     2. プレイヤーをレートの高い順にソートし、上からグループ形成の試行を行う。
     3. 10人グループが形成できたらマッチ成立とし、グループに入らなかったプレイヤーは
        次回のためにrange_spread_countをインクリメントする。
     """
-    waiting_users = get_waiting_users(queue_table)
-
-    if len(waiting_users) < 10:
-        for p in waiting_users:
-            increment_range_spread_count(p["user_id"])
-        return {
-            "statusCode": 200,
-            "body": "No matches found. Incremented range_spread_count for all waiting players."
-        }
-    
-    # 各プレイヤーの最新レートと許容レンジを計算
-    players = []
-    for user in waiting_users:
-        user_id = user["user_id"]
-        # ★ 将来拡張: blocking, role を利用した処理をここに挿入可能
-        rating = get_user_rating(user_id)
-        spread_count = user["range_spread_count"]
-        spread_speed = user["range_spread_speed"]
-        
-        if spread_count >= 5:
-            min_rating = -math.inf
-            max_rating = math.inf
-        else:
-            base = 50 + spread_speed * spread_count
-            min_rating = rating - base
-            max_rating = rating + base
-        
-        players.append({
-            "user_id": user_id,
-            "rating": rating,
-            "min_rating": min_rating,
-            "max_rating": max_rating,
-            "range_spread_speed": spread_speed,
-            "range_spread_count": spread_count,
-            "inqueued_unixtime": user["inqueued_unixtime"],
-            "discord_id": user["discord_id"] # キュー情報に含む
-        })
-    
-    # 降順（高い順）にソート
-    players.sort(key=lambda x: x["rating"], reverse=True)
-    
-    # グループ形成：できるだけ多くの10人グループを形成する
-    matched_groups = form_matches_from_pool(players)
-    
-    if matched_groups:
-        # METAアイテムから最新のマッチIDを取得（なければ初期値0）  
-        meta_item = queue_table.get_item(Key={"namespace": "default", "user_id": "#META#"}).get("Item")
-        match_id_base = int(meta_item.get("LatestMatchID", 0))
-        unused_vc = meta_item.get("UnusedVC", list(range(1, 100, 2)))
-        
-        # 各グループに対して連番のマッチIDを割り当て、マッチレコードを作成＆通知
-        for i, group in enumerate(matched_groups):
-            current_match_id = match_id_base + i + 1
-            # VCの割り当て：UnusedVCから先頭の奇数をpop（チームAのVC）、チームBはその値+1
-            if len(unused_vc) < 1:
-                raise Exception("UnusedVCが不足しています。")
-            vc_a = unused_vc.pop(0)
-            vc_b = vc_a + 1
-            finalize_match(group, current_match_id, vc_a, vc_b)
-        
-         # METAアイテムの更新：LatestMatchID と UnusedVC を１回の update_item で更新
-        new_match_id_base = match_id_base + len(matched_groups)
-        queue_table.update_item(
-            Key={"namespace": "default", "user_id": "#META#"},
-            UpdateExpression="SET LatestMatchID = :newID, UnusedVC = :vcList",
-            ExpressionAttributeValues={":newID": new_match_id_base, ":vcList": unused_vc}
-        )
-        
-        # 形成できなかったプレイヤーはrate_spread_countをインクリメント
-        used_ids = {p["user_id"] for group in matched_groups for p in group}
-        for p in players:
-            if p["user_id"] not in used_ids:
+    acquire_lock()
+    print("start match making process")
+    try:
+        waiting_users = get_waiting_users(queue_table)
+        print(waiting_users)
+        if len(waiting_users) < 10:
+            print("users in the queue is not enough. End the match making with increment the range.")
+            for p in waiting_users:
+                
                 increment_range_spread_count(p["user_id"])
+            update_queue_meta(waiting_users)
+            # update_bubble_queue_via_ws()
+            return {
+                "statusCode": 200,
+                "body": "No matches found. Incremented range_spread_count for all waiting players."
+            }
         
-        return {
-            "statusCode": 200,
-            "body": f"Matched {len(matched_groups)} groups. Match IDs assigned from {match_id_base+1} to {new_match_id_base}."
-        }
-    else:
-        # 1件もマッチ成立しなかった場合は、全員のrange_spread_countをインクリメント
-        for p in players:
-            increment_range_spread_count(p["user_id"])
-        return {
-            "statusCode": 200,
-            "body": "No matches found. Incremented range_spread_count for all waiting players."
-        }
+        # 各プレイヤーの最新レートと許容レンジを計算
+        players = []
+        for user in waiting_users:
+            user_id = user["user_id"]
+            # ★ 将来拡張: blocking, role を利用した処理をここに挿入可能
+            rating = user["rate"] #get_user_rating(user_id)
+            best = user["best"] #get_user_rating(user_id)
+            spread_count = user["range_spread_count"]
+            spread_speed = user["range_spread_speed"]
+            
+            if spread_count >= 5:
+                min_rating = -math.inf
+                max_rating = math.inf
+            else:
+                base = 50 + spread_speed * spread_count
+                min_rating = rating - base
+                max_rating = rating + base
+            
+            players.append({
+                "user_id": user_id,
+                "rate": rating,
+                "best": best,
+                "min_rating": min_rating,
+                "max_rating": max_rating,
+                "range_spread_speed": spread_speed,
+                "range_spread_count": spread_count,
+                "inqueued_unixtime": user["inqueued_unixtime"],
+                "discord_id": user["discord_id"] # キュー情報に含む
+            })
+        
+        # 降順（高い順）にソート
+        #players.sort(key=lambda x: x["rate"], reverse=True)
+        
+        # インキューした時間順（古い順＝先に入った順）にソート
+        players.sort(key=lambda x: x["inqueued_unixtime"])
+        # グループ形成：できるだけ多くの10人グループを形成する
+        matched_groups = form_matches_from_pool(players)
+        
+        if matched_groups:
+
+            print("match group made")
+            # METAアイテムから最新のマッチIDを取得（なければ初期値0）  
+            meta_item = queue_table.get_item(Key={"namespace": "default", "user_id": "#META#"}).get("Item")
+            match_id_base = int(meta_item.get("LatestMatchID", 0))
+            unused_vc = meta_item.get("UnusedVC", list(range(1, 100, 2)))
+            
+            # 各グループに対して連番のマッチIDを割り当て、マッチレコードを作成＆通知
+            for i, group in enumerate(matched_groups):
+                current_match_id = match_id_base + i + 1
+                # VCの割り当て：UnusedVCから先頭の奇数をpop（チームAのVC）、チームBはその値+1
+                if len(unused_vc) < 1:
+                    raise Exception("UnusedVCが不足しています。")
+                vc_a = unused_vc.pop(0)
+                vc_b = vc_a + 1
+                finalize_match(group, current_match_id, vc_a, vc_b)
+           
+            # METAアイテムの更新：LatestMatchID と UnusedVC を１回の update_item で更新
+            new_match_id_base = match_id_base + len(matched_groups)
+            print("idbase, new, unusedvc",match_id_base, new_match_id_base, unused_vc)
+            queue_table.update_item(
+                Key={"namespace": "default", "user_id": "#META#"},
+                UpdateExpression="SET LatestMatchID = :newID, UnusedVC = :vcList",
+                ExpressionAttributeValues={":newID": new_match_id_base, ":vcList": unused_vc}
+            )
+            
+            # 形成できなかったプレイヤーはrate_spread_countをインクリメント
+            used_ids = {p["user_id"] for group in matched_groups for p in group}
+            remined_user = []
+            for p in players:
+                if p["user_id"] not in used_ids:
+                    increment_range_spread_count(p["user_id"])
+                    remined_user.append(p)
+            update_queue_meta(remined_user)
+            # update_bubble_queue_via_ws()
+            return {
+                "statusCode": 200,
+                "body": f"Matched {len(matched_groups)} groups. Match IDs assigned from {match_id_base+1} to {new_match_id_base}."
+            }
+        else:
+            # 1件もマッチ成立しなかった場合は、全員のrange_spread_countをインクリメント
+            for p in players:
+                increment_range_spread_count(p["user_id"])
+
+            update_queue_meta(players)
+            # update_bubble_queue_via_ws()
+            return {
+                "statusCode": 200,
+                "body": "No matches found. Incremented range_spread_count for all waiting players."
+            }
+        
+        
+    except Exception as e:
+        print("ERROR: ", e) 
+    finally:
+        
+        release_lock()
 
 def get_waiting_users(queue):
     """マッチキューからマッチング待ちのユーザを取得"""
     response = queue.query(
         IndexName="rate_index",
         KeyConditionExpression=Key("namespace").eq("default"),
-        ScanIndexForward=False,
-        ProjectionExpression="user_id, rate, blocking, role, rate_spread_speed, rate_spread_count, discord_id",
+        FilterExpression=Attr("user_id").ne("#META#"),  # user_id != "#META#"
+        ProjectionExpression="user_id, rate, best, blocking, desired_role, range_spread_speed, range_spread_count, discord_id, inqueued_unixtime"
     )
     return response["Items"]
 
@@ -146,7 +235,7 @@ def get_user_rating(user_id):
     """UserTableから最新のレートを取得する"""
     resp = user_table.get_item(Key={"user_id": user_id})
     if "Item" in resp:
-        return resp["Item"].get("rating", 1500)
+        return resp["Item"].get("rate", 1500)
     return 1500
 
 def form_matches_from_pool(pool):
@@ -242,9 +331,10 @@ def finalize_match(group, match_id, vc_a, vc_b):
     # ② MatchesTableへマッチレコードを作成
     matches_table.put_item(
         Item={
+            "namespace":"default",
             "match_id": int(match_id),  # match_idはint型
-            "team_A": [[p["user_id"], int(p["rate"])] for p in team_a_players],
-            "team_B": [[p["user_id"], int(p["rate"])] for p in team_b_players],
+            "team_A": [[p["user_id"], int(p["rate"]), int(p["best"])] for p in team_a_players],
+            "team_B": [[p["user_id"], int(p["rate"]), int(p["best"])] for p in team_b_players],
             "matched_unix_time": int(time.time()),
             "status": "matched",
             "user_reports": [],
@@ -254,10 +344,11 @@ def finalize_match(group, match_id, vc_a, vc_b):
             "vc_B": int(vc_a + 1)
         }
     )
-
+    asyncio.run(notify_bubble([p["user_id"]for p in team_a_players]+[p["user_id"]for p in team_b_players], match_id))
     
     # ⑤ Discordへ通知送信
     asyncio.run(notify_discord(match_id, vc_a, vc_b, team_a_discord, team_b_discord))
+
 
 
 
@@ -265,28 +356,29 @@ def increment_range_spread_count(user_id):
     """マッチに入らなかったプレイヤーのrange_spread_countをインクリメントする"""
     queue_table.update_item(
         Key={"namespace": "default", "user_id": user_id},
-        ConditionExpression=Attr("status").eq("waiting"),
         UpdateExpression="SET #c = #c + :inc",
         ExpressionAttributeNames={"#c": "range_spread_count"},
         ExpressionAttributeValues={":inc": 1}
     )
+    print(user_id, "count has been incremented")
 
 # 各プレイヤーの assigned_match_id を新しい match_id に更新する処理
 def update_assigned_match_ids(user_ids, match_id):
     for uid in user_ids:
         user_table.update_item(
-            Key={"user_id": uid},
+            Key={"namespace": "default","user_id": uid},
             UpdateExpression="SET assigned_match_id = :m",
             ExpressionAttributeValues={":m": match_id}
         )
 
 async def notify_discord(match_id, vc_a, vc_b, team_a, team_b):
+
     """
     DiscordのWebhookを用いてマッチ通知を送信する関数。
     """
     # プレイヤーIDリストをスペース区切りで連結
-    team_a_str = " ".join(team_a)
-    team_b_str = " ".join(team_b)
+    team_a_str = " ".join([f"<@{p}>" for p in team_a])
+    team_b_str = " ".join([f"<@{p}>" for p in team_b])
     
     content = (
         f"**VC有りバトルでマッチしました**\r"
@@ -306,3 +398,15 @@ async def notify_discord(match_id, vc_a, vc_b, team_a, team_b):
                 text = await response.text()
                 print(f"Discord通知送信失敗: {response.status}")
                 print("レスポンス:", text)
+
+    
+    
+async def notify_bubble(players, match_id):
+    # Bubbleへ通知
+    json = {
+        "players": players,
+        "match_id": int(match_id)
+    }
+
+    requests.request(method="POST", url=BUBBLE_ASSIGN_MATCH_URL, headers=headers, json=json)
+    

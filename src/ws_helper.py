@@ -47,7 +47,7 @@ async def post_to_user(connection_ids, message_obj):
             await post_message_to_connection(cid, message_obj, endpoint_url)
 
 
-async def broadcast_queue_count(queue_count, connection_ids):
+async def broadcast_queue_count( connection_ids):
     """
     1秒間に1回だけ最新のキュー情報をすべての接続ユーザーにブロードキャストする
     """
@@ -63,7 +63,7 @@ async def broadcast_queue_count(queue_count, connection_ids):
         return
 
     # ブロードキャストメッセージ
-    message_data = {"action": "updateQueue", "queueCount": queue_count}
+    message_data = {"action": "updateQueue"}
 
     # WebSocket経由で送信
     await post_to_user(connection_ids, message_data)

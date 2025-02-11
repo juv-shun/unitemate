@@ -3,6 +3,7 @@ frameworkVersion: "3"
 
 provider:
   name: aws
+  endpointType: REGIONAL
   runtime: python3.9
   region: ap-northeast-1
   stackName: ${sls:stage}-${self:service}-stack
@@ -31,6 +32,8 @@ provider:
             - !Join ["", [!GetAtt DynamoDBUserTable.Arn, "/index/*"]]
             - !GetAtt DynamoDBRecordTable.Arn  # レコード
             - !Join ["", [!GetAtt DynamoDBRecordTable.Arn, "/index/*"]]
+            - !GetAtt ConnectionTable.Arn
+            - !Join ["", [!GetAtt ConnectionTable.Arn, "/*"]]
         - Effect: Allow
           Action:
             - lambda:InvokeFunction
@@ -51,13 +54,38 @@ provider:
             - arn:aws:sqs:${aws:region}:${aws:accountId}:${self:service}-${sls:stage}-match-report-queue
             - !GetAtt AggregationQueue.Arn
 
+        - Effect: Allow
+          Action:
+            - apigatewaymanagementapi:GetConnection
+            - apigatewaymanagementapi:PostToConnection
+          Resource:
+            - arn:aws:execute-api:${aws:region}:${aws:accountId}:*/@connections/*
+        - Effect: Allow
+          Action:
+            - execute-api:ManageConnections
+            - apigatewaymanagementapi:GetConnection
+            - apigatewaymanagementapi:PostToConnection
+          Resource:
+            - arn:aws:execute-api:${aws:region}:${aws:accountId}:${self:custom.websocketApiId}/${sls:stage}/@connections/*
+    
+        - Effect: Allow
+          Action:
+            - apigateway:GET
+          Resource:
+            - arn:aws:apigateway:${aws:region}::/apis/*
   environment:
     MATCH_QUEUE: !Ref DynamoDBMatchQueue
     MATCH_TABLE: !Ref DynamoDBMatchTable
     USER_TABLE: !Ref DynamoDBUserTable
     REPORT_QUEUE: !Ref ReportQueue
+    CONNECTION_TABLE: !Ref ConnectionTable
     AGGREGATION_QUEUE: !Ref AggregationQueue
     RECORD_TABLE: !Ref DynamoDBRecordTable
+    AWS_STAGE: ${sls:stage}
+    WEBSOCKET_API_ID: !Ref WebsocketsApi
+    WSS_DOMAIN_NAME: !Sub "${WebsocketsApi}.execute-api.${AWS::Region}.amazonaws.com"
+    BUBBLE_ASSIGN_MATCH_URL: ${param:bubble_assign_match_id}
+    BUBBLE_PENALTY: ${param:bubble_penalty}
 
 package:
   individually: true
@@ -71,7 +99,7 @@ functions:
   # インキュー ########################
   # キューにインキューするAPI
   inqueue:
-    handler: src/db_process_queue.send_inqueue_message
+    handler: src/match_queue.inqueue
     events:
       - http:
           path: v1/queue/_inqueue
@@ -80,7 +108,7 @@ functions:
 
   # キューからデキューするAPI
   dequeue:
-    handler: src/db_process_queue.send_dequeue_message
+    handler: src/match_queue.dequeue
     events:
       - http:
           path: v1/queue/_dequeue
@@ -98,12 +126,6 @@ functions:
   # マッチメイク ########################
   match_make: # マッチメイクするバッチ
     handler: src/db_process_queue.send_matchmake_message
-    events:
-      - schedule:
-          name: ${sls:stage}-${self:service}-match-make-schedule
-          description: Schedule for match making
-          rate: cron(*/5 * * * ? *)
-          enabled: ${self:custom.cache.${sls:stage}.schedule_enabled}
     timeout: 15
 
   # 結果報告、集計 ########################
@@ -149,6 +171,15 @@ functions:
           private: true
     environment:
       USER_TABLE: !Ref DynamoDBUserTable
+
+  user_records: # ユーザの試合記録を返すAPI
+    handler: src/user_info.get_records
+    events:
+      - http:
+          path: v1/users/{user_id}/rec
+          method: get
+          private: true
+    environment:
       RECORD_TABLE: !Ref DynamoDBRecordTable
 
   # ランキング ########################
@@ -169,6 +200,99 @@ functions:
       USER_TABLE: !Ref DynamoDBUserTable
       RECORD_TABLE: !Ref DynamoDBRecordTable
 
+  ##################################
+  # 追加: WebSocket関数
+  ##################################
+  wsConnect:
+    handler: src/ws_api.on_connect
+    events:
+      - websocket: $connect
+
+  wsDisconnect:
+    handler: src/ws_api.on_disconnect
+    events:
+      - websocket: $disconnect
+
+  wsMessage:
+    handler: src/ws_api.on_message
+    events:
+      - websocket: $default
+    environment:
+      USER_TABLE: !Ref DynamoDBUserTable
+
+  connection_test:
+    handler: src/ws_api.connection_test
+    environment:
+      USER_TABLE: !Ref DynamoDBUserTable
+      WEBSOCKET_API_ID: !Ref WebsocketsApi
+      DUMMY: ${param:dummy_account}
+  ##################################
+
+  dbProcessQueueHandler:
+    handler: src/db_process_queue.db_process_queue_handler
+    name: ${self:service}-${sls:stage}-db-process-queue-handler
+    events:
+      - sqs:
+          arn:
+            Fn::GetAtt:
+              - AggregationQueue
+              - Arn
+    timeout: 10
+
+  make_judge:
+    handler: src/match_judge.gather_match
+    name: ${self:service}-${sls:stage}-gather-match
+    events:
+      - schedule:
+          name: ${sls:stage}-${self:service}-gather-matchschedule
+          description: Schedule for match making
+          rate: cron(*/5 * * * ? *)
+          enabled: ${self:custom.cache.${sls:stage}.schedule_enabled}
+    timeout: 15
+
+stepFunctions:
+  stateMachines:
+    MatchMakeStateMachine:
+      name: ${self:service}-${sls:stage}-matchmake
+      definition:
+        Comment: "State machine for match making every 20 seconds for 1 hour."
+        StartAt: Initialize
+        States:
+          Initialize:
+            Type: Pass
+            Result:
+              counter: 0
+              maxIterations: 3  # 20秒 x 180 = 3600秒（約1時間）
+            ResultPath: "$.loop"
+            Next: MatchMakeTask
+          MatchMakeTask:
+            Type: Task
+            Resource: arn:aws:lambda:${aws:region}:${aws:accountId}:function:${self:service}-${sls:stage}-match_make
+            ResultPath: "$.taskResult"
+            Next: Wait20Seconds
+          Wait20Seconds:
+            Type: Wait
+            Seconds: 20
+            Next: IncrementCounter
+          IncrementCounter:
+            Type: Pass
+            Parameters:
+              counter.$: "States.MathAdd($.loop.counter, 1)"
+              maxIterations.$: "$.loop.maxIterations"
+            ResultPath: "$.loop"
+            Next: CheckCounter
+          CheckCounter:
+            Type: Choice
+            Choices:
+              - Variable: "$.loop.counter"
+                NumericLessThan: 3
+                Next: MatchMakeTask
+            Default: EndState
+          EndState:
+            Type: Pass
+            End: true
+
+
 custom:
   prune:
     automatic: true
@@ -187,7 +311,11 @@ custom:
       cache_ttl: 0
       schedule_enabled: false
 
+  websocketApiId: ${cf:${self:service}-${sls:stage}.WebSocketApiId, 'default-websocket-api-id'}
+  websocketApiEndpoint: ${cf:${self:service}-${sls:stage}.WebSocketApiEndpoint, 'default-websocket-endpoint'}
+
 plugins:
+  - serverless-step-functions
   - serverless-python-requirements
   - serverless-prune-plugin
   - serverless-api-gateway-caching
@@ -312,6 +440,18 @@ resources:
               ProjectionType: ALL
         BillingMode: PAY_PER_REQUEST
 
+    ConnectionTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${sls:stage}-${self:service}-connections
+        AttributeDefinitions:
+          - AttributeName: connection_id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: connection_id
+            KeyType: HASH
+        BillingMode: PAY_PER_REQUEST
+
     # SQS
     ReportQueue:
       Type: AWS::SQS::Queue
@@ -324,14 +464,83 @@ resources:
         FifoQueue: true
         ContentBasedDeduplication: true # 同一のメッセージは重複して処理されないようにする
 
+    #websocket
+    WebsocketsApi:
+      Type: AWS::ApiGatewayV2::Api
+      Properties:
+        Name: ${self:service}-${sls:stage}-WebSocketApi
+        ProtocolType: WEBSOCKET
+        RouteSelectionExpression: $request.body.action
+
+    # EventBrigdeRole
+    EventBridgeInvocationRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: ${self:service}-${sls:stage}-EB-InvokeStateMachine
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                  - events.amazonaws.com
+              Action:
+                - sts:AssumeRole
+        Policies:
+          - PolicyName: InvokeStateMachinePolicy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - states:StartExecution
+                  Resource: arn:aws:states:${aws:region}:${aws:accountId}:stateMachine:${self:service}-${sls:stage}-matchmake
+                  
+    WeekdayMatchMakeRule:
+      Type: AWS::Events::Rule
+      Properties:
+        Name: ${sls:stage}-matchmake-weekday
+        Description: "Trigger matchmake state machine on weekdays (JST 14:00 to 04:00)"
+        ScheduleExpression: "cron(0/1 5-18 ? * MON-FRI *)"
+        State: ENABLED
+        Targets:
+          - Arn: arn:aws:states:${aws:region}:${aws:accountId}:stateMachine:${self:service}-${sls:stage}-matchmake
+            Id: "MatchMakeStateMachineTarget"
+            RoleArn: !GetAtt EventBridgeInvocationRole.Arn
+
+    WeekendMatchMakeRule:
+      Type: AWS::Events::Rule
+      Properties:
+        Name: ${sls:stage}-matchmake-weekend
+        Description: "Trigger matchmake state machine on weekends (JST all day)"
+        ScheduleExpression: "cron(0/1 * ? * SAT,SUN *)"
+        State: ENABLED
+        Targets:
+          - Arn: arn:aws:states:${aws:region}:${aws:accountId}:stateMachine:${self:service}-${sls:stage}-matchmake
+            Id: "MatchMakeStateMachineTargetWeekend"
+            RoleArn: !GetAtt EventBridgeInvocationRole.Arn
+
+  Outputs:
+    WebSocketApiId:
+      Value: !Ref WebsocketsApi
+      Export:
+        Name: ${self:service}-${sls:stage}-WebSocketApiId
+
+    WebSocketApiEndpoint:
+      Value: !Sub "wss://${WebsocketsApi}.execute-api.${AWS::Region}.amazonaws.com/${sls:stage}"
+      Export:
+        Name: ${self:service}-${sls:stage}-WebSocketApiEndpoint
+        
 params:
   prd:
-    bubble_assign_match_id: https://unitemate.com/api/1.1/wf/aws_player_assign_match
+    bubble_assign_match_id: https://unitemate.com/api/1.1/wf/aws_unitemate_assign_match
+    bubble_penalty: https://unitemate.com/api/1.1/wf/aws_unitemate_penalty
     bubble_queue_count: https://unitemate.com/api/1.1/wf/aws_queue_count
     bubble_notify_discord: https://unitemate.com/api/1.1/wf/aws_notify_discord
     dummy_account: "1734557995118x731332103265083300"
   dev:
-    bubble_assign_match_id: https://unitemate.com/version-test/api/1.1/wf/aws_player_assign_match
+    bubble_assign_match_id: https://unitemate.com/version-test/api/1.1/wf/aws_unitemate_assign_match
+    bubble_penalty: https://unitemate.com/version-test/api/1.1/wf/aws_unitemate_penalty
     bubble_queue_count: https://unitemate.com/version-test/api/1.1/wf/aws_queue_count
     bubble_notify_discord: https://unitemate.com/version-test/api/1.1/wf/aws_notify_discord
     dummy_account: "1734023940139x458248834150225500"
