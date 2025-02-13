@@ -30,7 +30,7 @@ provider:
             - !Join ["", [!GetAtt DynamoDBMatchTable.Arn, "/index/*"]]
             - !GetAtt DynamoDBUserTable.Arn
             - !Join ["", [!GetAtt DynamoDBUserTable.Arn, "/index/*"]]
-            - !GetAtt DynamoDBRecordTable.Arn  # レコード
+            - !GetAtt DynamoDBRecordTable.Arn # レコード
             - !Join ["", [!GetAtt DynamoDBRecordTable.Arn, "/index/*"]]
             - !GetAtt ConnectionTable.Arn
             - !Join ["", [!GetAtt ConnectionTable.Arn, "/*"]]
@@ -67,7 +67,7 @@ provider:
             - apigatewaymanagementapi:PostToConnection
           Resource:
             - arn:aws:execute-api:${aws:region}:${aws:accountId}:${self:custom.websocketApiId}/${sls:stage}/@connections/*
-    
+
         - Effect: Allow
           Action:
             - apigateway:GET
@@ -200,6 +200,18 @@ functions:
       USER_TABLE: !Ref DynamoDBUserTable
       RECORD_TABLE: !Ref DynamoDBRecordTable
 
+  # おすすめルート ########################
+  recommend_route:
+    handler: src/recommend_route.handle
+    timeout: 25
+    memorySize: 128
+    events:
+      - http:
+          path: v1/recommend_route
+          method: post
+    environment:
+      GEMINI_API_KEY: ${ssm:/${self:service}/gemini/api_key}
+
   ##################################
   # 追加: WebSocket関数
   ##################################
@@ -262,7 +274,7 @@ stepFunctions:
             Type: Pass
             Result:
               counter: 0
-              maxIterations: 3  # 20秒 x 180 = 3600秒（約1時間）
+              maxIterations: 3 # 20秒 x 180 = 3600秒（約1時間）
             ResultPath: "$.loop"
             Next: MatchMakeTask
           MatchMakeTask:
@@ -291,7 +303,6 @@ stepFunctions:
           EndState:
             Type: Pass
             End: true
-
 
 custom:
   prune:
@@ -495,7 +506,7 @@ resources:
                   Action:
                     - states:StartExecution
                   Resource: arn:aws:states:${aws:region}:${aws:accountId}:stateMachine:${self:service}-${sls:stage}-matchmake
-                  
+
     WeekdayMatchMakeRule:
       Type: AWS::Events::Rule
       Properties:
@@ -530,7 +541,7 @@ resources:
       Value: !Sub "wss://${WebsocketsApi}.execute-api.${AWS::Region}.amazonaws.com/${sls:stage}"
       Export:
         Name: ${self:service}-${sls:stage}-WebSocketApiEndpoint
-        
+
 params:
   prd:
     bubble_assign_match_id: https://unitemate.com/api/1.1/wf/aws_unitemate_assign_match
