@@ -30,6 +30,7 @@ async def on_connect_async(event, context):
     if not bubble_user_id:
         return {"statusCode": 400, "body": "Missing user_id"}
 
+    '''現在ConnectionTableは使っていないため、登録機構を一旦コメントアウト
     try:
         # DynamoDB リソースの取得
         async with aioboto3.Session().resource("dynamodb") as dynamodb:
@@ -54,6 +55,7 @@ async def on_connect_async(event, context):
 
     except Exception as e:
         print("Error in on_connect:", e)
+    '''
 
     return {"statusCode": 200}
 
@@ -66,6 +68,7 @@ async def on_disconnect_async(event, context):
     connection_id = event["requestContext"]["connectionId"]
     print(f"[OnDisconnect] {connection_id}")
 
+    '''現在ConnectionTableは使っていないため、登録機構を一旦コメントアウト
     try:
         # DynamoDB リソースの取得
         async with aioboto3.Session().resource("dynamodb") as dynamodb:
@@ -95,6 +98,7 @@ async def on_disconnect_async(event, context):
 
     except Exception as e:
         print("Error in on_disconnect:", e)
+    '''
 
     return {"statusCode": 200}
 

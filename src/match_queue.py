@@ -104,7 +104,7 @@ def update_queue_meta():
         print("error at update_queue_meta", e)
 
 def update_queue_count():
-    # 接続している全ユーザーの connection_id を取得
+    # 接続している全ユーザーの connection_id を取得　現状未使用
     try:
         connection_resp = connection_table.scan(ProjectionExpression="connection_id")
         connection_ids = [
@@ -186,20 +186,24 @@ def get_info(event, _):
         if "Item" in response:
             rate_list = response["Item"]["rate_list"]
             range_list = response["Item"]["range_list"]
+            ongoing = response["Item"].get("ongoing_matches", 0)
             #ongoing = sum(response["Item"]["match_counter"])
         else:
             rate_list = []
             range_list = []
+            ongoing = 0
             #ongoing = 0
 
         response_body = {
             "rate_list": rate_list,
             "range_list": range_list,
+            "ongoing": ongoing,
         }
     except:
         response_body = {
             "rate_list": [],
             "range_list": [],
+            "ongoing": 0,
         }
 
     return {"statusCode": 200, "body": json.dumps(response_body, cls=DecimalEncoder)}

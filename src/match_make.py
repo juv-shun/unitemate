@@ -159,8 +159,12 @@ def handle(event, context):
         
         # インキューした時間順（古い順＝先に入った順）にソート
         players.sort(key=lambda x: x["inqueued_unixtime"])
+        
         # グループ形成：できるだけ多くの10人グループを形成する
-        matched_groups = form_matches_from_pool(players)
+        #matched_groups = form_matches_from_pool(players)
+
+        # BFSを採用したメソッドを使用
+        matched_groups = find_valid_groups(players)
         
         if matched_groups:
 
@@ -307,6 +311,9 @@ def finalize_match(group, match_id, vc_a, vc_b):
       5. notify_discord()を呼び出してDiscordへマッチ通知を送信する。
     """
     user_ids = [p["user_id"] for p in group]
+
+    # ★ グループをレート順（降順：レートが高い順）にソートする
+    group.sort(key=lambda x: x["rate"], reverse=True)
     
     # ① QueueTableから各プレイヤーのエントリを削除
     for uid in user_ids:
@@ -410,3 +417,64 @@ async def notify_bubble(players, match_id):
 
     requests.request(method="POST", url=BUBBLE_ASSIGN_MATCH_URL, headers=headers, json=json)
     
+
+def dfs_group(players, start_index, current_group, current_min, current_max):
+    """
+    深さ優先探索／バックトラッキングで、現在の共通許容レンジ [current_min, current_max]
+    を満たしながら、候補プレイヤーを追加して10人グループを構築する。
+    
+    :param players: 各要素が辞書 {"user_id", "rate", "min_rating", "max_rating", ...} のリスト
+    :param start_index: この段階での探索開始インデックス
+    :param current_group: これまでに選ばれたプレイヤーのリスト
+    :param current_min: 現在の共通許容レンジの下限
+    :param current_max: 現在の共通許容レンジの上限
+    :return: もし有効な10人グループが見つかればそのリストを返す。見つからなければ None
+    """
+    if len(current_group) == 10:
+        return current_group
+
+    for i in range(start_index, len(players)):
+        candidate = players[i]
+        # 候補プレイヤーの実際のレートが、現在の共通許容レンジに含まれているかチェック
+        if not (current_min <= candidate["rate"] <= current_max):
+            continue
+
+        # 候補の許容レンジとの交差を計算
+        new_min = max(current_min, candidate["min_rating"])
+        new_max = min(current_max, candidate["max_rating"])
+        if new_min > new_max:
+            continue
+
+        # 候補をグループに追加して再帰的に探索
+        new_group = current_group + [candidate]
+        result = dfs_group(players, i + 1, new_group, new_min, new_max)
+        if result is not None:
+            return result
+
+    return None
+
+def find_valid_groups(players):
+    """
+    プレイヤーリストからDFS／バックトラッキングで条件を満たす10人グループを
+    重複なく全て見つける。例えば、30人の候補から3グループが見つかれば、
+    [group1, group2, group3] のリストを返す。
+    
+    :param players: 各要素が辞書 {"user_id", "rate", "min_rating", "max_rating", ...} のリスト
+    :return: 有効なグループ（各グループは10人のリスト）のリスト。グループが見つからなければ空リスト
+    """
+    groups = []
+    # candidates をコピー。なお、プレイヤーリストはあらかじめ希望の順（例えば、降順やインキュー順）にソートしておく
+    remaining_players = players[:]
+    
+    while len(remaining_players) >= 10:
+        # 初期の共通レンジは (-∞, +∞)
+        group = dfs_group(remaining_players, 0, [], -math.inf, math.inf)
+        if group is None:
+            break  # 残りからは10人グループが作れない
+        
+        groups.append(group)
+        # グループに含まれるプレイヤーの user_id を除外
+        used_ids = set(p["user_id"] for p in group)
+        remaining_players = [p for p in remaining_players if p["user_id"] not in used_ids]
+    
+    return groups

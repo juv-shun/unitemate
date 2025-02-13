@@ -54,7 +54,7 @@ def get_ranking(event, context):
         )
 
         # 上位50人を選出
-        top_rankings = sorted_items[:50] if len(sorted_items) > 50 else sorted_items
+        top_rankings = sorted_items[:100] if len(sorted_items) > 100 else sorted_items
 
         print(top_rankings)
         return {

@@ -77,14 +77,26 @@ def report(event, _):
         },
     )
 
-    # TODO レポートの数が足りているならジャッジ?
-
+    # ユーザーのアサインマッチを解除
     user_table.update_item(
         Key={"namespace": "default", "user_id": model.user_id},
         UpdateExpression="SET assigned_match_id = :zero",
         ExpressionAttributeValues={":zero": 0}
     )
     
+    try:
+        # Recordテーブルに同じキー（user_id, match_id）のレコードが存在するかチェック
+        record_response = record_table.get_item(Key={"user_id": model.user_id, "match_id": model.match_id})
+        if "Item" in record_response:
+            # 既存レコードが存在する場合、レコードの "pokemon" を model.picked_pokemon で上書き
+            record_table.update_item(
+                Key={"user_id": model.user_id, "match_id": model.match_id},
+                UpdateExpression="SET pokemon = :p",
+                ExpressionAttributeValues={":p": model.picked_pokemon}
+            )
+            print(f"Existing record found. Updated record's pokemon to {model.picked_pokemon}")
+    except Exception as e:
+        print("Error at report serch record table" , e)
 
     return {"statusCode": 200, "body": None}
 

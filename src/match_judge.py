@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 import json
 import uuid
 
-
+from .match_queue import is_locked
 
 MATCH_TABLE = os.environ["MATCH_TABLE"]
 USER_TABLE = os.environ["USER_TABLE"]
@@ -86,6 +86,17 @@ def gather_match(event, context):
     )
     for match in response["Items"]:
         send_process_result_message({"match_id": int(match["match_id"])}, context)
+
+    # 進行中の試合数をカウント
+    ongoing_count = len(response["Items"])
+
+    if not is_locked():
+        # Queue_table の META アイテムに ongoing_matches を更新
+        queue_table.update_item(
+            Key={"namespace": "default", "user_id": "#META#"},
+            UpdateExpression="SET ongoing_matches = :om",
+            ExpressionAttributeValues={":om": ongoing_count}
+        )
 
     return {
                 "statusCode": 200,
@@ -195,20 +206,6 @@ def judge_timeout(event, context):
         except Exception as e:
             print("error :", e)
 
-
-
-# 処理の中身
-def judge_report_num(event, context):
-    # 
-
-    pass
-
-def judge(event, context):
-    pass
-
-# 処理の中身　暫定順位を算出　一旦PASS
-def update_ranking_order():
-    pass
 
 def send_process_result_message(event, context):
     message_body = json.dumps({
