@@ -12,6 +12,8 @@ requests = "^2.32.3"
 pydantic = "^2.10.5"
 aioboto3 = "^13.4.0"
 boto3 = ">=1.36.0,<1.36.2"
+google-genai = "^1.2.0"
+tenacity = "^9.0.0"
 
 [tool.poetry.group.dev.dependencies]
 black = "^24.10.0"
