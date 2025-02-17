@@ -155,16 +155,16 @@ def handle(event, context):
             })
         
         # 降順（高い順）にソート
-        #players.sort(key=lambda x: x["rate"], reverse=True)
+        players.sort(key=lambda x: x["rate"], reverse=True)
         
         # インキューした時間順（古い順＝先に入った順）にソート
-        players.sort(key=lambda x: x["inqueued_unixtime"])
+        #players.sort(key=lambda x: x["inqueued_unixtime"])
         
         # グループ形成：できるだけ多くの10人グループを形成する
-        #matched_groups = form_matches_from_pool(players)
+        matched_groups = form_matches_from_pool(players)
 
         # BFSを採用したメソッドを使用
-        matched_groups = find_valid_groups(players)
+        #matched_groups = find_valid_groups(players)
         
         if matched_groups:
 

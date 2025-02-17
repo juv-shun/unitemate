@@ -151,7 +151,13 @@ def judge_timeout(event, context):
             viodict = {}
             #報告から各ユーザーの使用ポケモンと、通報プレイヤーを特定
             for r in report:
-                chardict[r.get("user_id")] = r.get("picked_pokemon")
+                userid = r.get("user_id") 
+                # 稀にユーザーから二重でレポートが来ている場合、nullではない方の結果を維持
+                if userid in chardict.keys() and r.get("picked_pokemon")!="null":
+                    chardict[userid] = r.get("picked_pokemon")
+                else:
+                    chardict[userid] = r.get("picked_pokemon")
+                
                 for viorate_user in r.get("vioration_report").split(", "):
                     if viorate_user in viodict.keys():
                         viodict[viorate_user] += 1
@@ -348,7 +354,12 @@ def update_player_data(user_id, rate_delta, win, match_id, started_date, pokemon
         
 
 def penalty(user_id):
-    # プレイヤーのデータを取得
+    """
+    ペナルティを算出して Bubble API に送信し、
+    Bubble 側から返される user_penalty をもとに DynamoDB 上のユーザーデータを更新。
+    ペナルティが 1 以上の場合、レートを (ペナルティ * 4) 分だけ減算する。
+    """
+    # 1) ユーザーデータを取得
     response = user_table.get_item(
         Key={
             "namespace": "default",
@@ -356,11 +367,66 @@ def penalty(user_id):
         },
     )
     if "Item" not in response:
+        # ユーザーが存在しない場合は処理しない
+        print(f"[INFO] penalty(): user {user_id} not found.")
         return
-    correction = response["Item"].get("unitemate_num_record", 0) // 50
-    json = {
+
+    user_item = response["Item"]
+    current_rate = user_item.get("rate", 1500)
+    
+    # 2) ペナルティ軽減値 (試合数 / 50) を計算
+    correction = user_item.get("unitemate_num_record", 0) // 50
+    
+    # 3) Bubble API にリクエストを送信し、レスポンスを取得
+    json_data = {
         "player": user_id,
         "penaltycorrction": int(correction)
     }
+    try:
+        bubble_response = requests.request(
+            method="POST",
+            url=BUBBLE_PENALTY,
+            headers=headers,
+            json=json_data
+        )
+        bubble_response.raise_for_status()  # 200系以外の場合は例外を投げる
+    except Exception as e:
+        print(f"[ERROR] penalty(): Failed to call Bubble API for user {user_id}. {e}")
+        return
 
-    requests.request(method="POST", url=BUBBLE_PENALTY, headers=headers, json=json)
+    # 4) Bubble 側から返されたペナルティ値を取得
+    try:
+        data = bubble_response.json()
+        # Bubble が "user_penalty" というキーで返す想定
+        user_penalty = data.get("user_penalty", 0)
+    except ValueError:
+        print(f"[ERROR] penalty(): Could not parse JSON from Bubble for user {user_id}. Response: {bubble_response.text}")
+        return
+
+    print(f"[INFO] penalty(): user {user_id} => user_penalty={user_penalty}")
+
+    # 5) ペナルティを DynamoDB 上に保存するためのアップデート
+    #    ペナルティが 1 以上の場合、レートを (ペナルティ * 4) 分減算
+    penalty_deduction = 4
+    if user_penalty >= 1:
+        penalty_deduction = user_penalty * 4  # ペナルティ × 4
+    
+    new_rate = current_rate - penalty_deduction
+
+    user_table.update_item(
+        Key={"namespace": "default", "user_id": user_id},
+        UpdateExpression="""
+            SET #penalty = :pval,
+                #rate = :rval
+        """,
+        ExpressionAttributeNames={
+            "#penalty": "unitemate_penalty",
+            "#rate": "rate"
+        },
+        ExpressionAttributeValues={
+            ":pval": int(user_penalty),
+            ":rval": int(new_rate)
+        }
+    )
+
+    print(f"[INFO] penalty(): Updated user {user_id} rate from {current_rate} to {new_rate}, penalty={user_penalty}.")
