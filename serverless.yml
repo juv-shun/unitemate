@@ -512,8 +512,8 @@ resources:
       Type: AWS::Events::Rule
       Properties:
         Name: ${sls:stage}-matchmake-weekday-morning
-        Description: "Trigger matchmake on weekdays (JST 0:00-4:00) for Mon-Thu"
-        ScheduleExpression: "cron(0/1 15-18 ? * SUN,MON,TUE,WED *)"
+        Description: "Trigger matchmake on weekdays (JST 0:00-4:00) for Mon-Fri"
+        ScheduleExpression: "cron(0/1 15-18 ? * SUN,MON,TUE,WED,THU *)"
         State: ENABLED
         Targets:
           - Arn: arn:aws:states:${aws:region}:${aws:accountId}:stateMachine:${self:service}-${sls:stage}-matchmake
@@ -569,6 +569,31 @@ resources:
             RoleArn: !GetAtt EventBridgeInvocationRole.Arn
 
 
+    HolidayMatchMakeRuleMondayPart1:
+      Type: AWS::Events::Rule
+      Properties:
+        Name: ${sls:stage}-matchmake-holiday-mon-part1
+        Description: "Trigger matchmake on holiday Monday (JST 4:00-8:59)"
+        # JST 4:00～8:59 = UTC 前日の19:00～23:59
+        ScheduleExpression: "cron(0/1 19-23 ? * SUN *)"
+        State: ENABLED
+        Targets:
+          - Arn: arn:aws:states:${aws:region}:${aws:accountId}:stateMachine:${self:service}-${sls:stage}-matchmake
+            Id: "MatchMakeStateMachineTargetHolidayMonPart1"
+            RoleArn: !GetAtt EventBridgeInvocationRole.Arn
+
+    HolidayMatchMakeRuleMondayPart2:
+      Type: AWS::Events::Rule
+      Properties:
+        Name: ${sls:stage}-matchmake-holiday-mon-part2
+        Description: "Trigger matchmake on holiday Monday (JST 9:00-14:00)"
+        # JST 9:00～14:00 = UTC 00:00～05:00
+        ScheduleExpression: "cron(0/1 0-4 ? * MON *)"   
+        State: ENABLED
+        Targets:
+          - Arn: arn:aws:states:${aws:region}:${aws:accountId}:stateMachine:${self:service}-${sls:stage}-matchmake
+            Id: "MatchMakeStateMachineTargetHolidayMonPart2"
+            RoleArn: !GetAtt EventBridgeInvocationRole.Arn
 
 
   Outputs:

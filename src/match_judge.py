@@ -188,9 +188,12 @@ def judge_timeout(event, context):
 
             # 通報が多いユーザーのペナルティ判定
             for k,v in viodict.items():
-                if v > 4:
-                    print("penalty for user", k)
-                    penalty(k)
+                if v > 3:
+                    try:
+                        print("penalty for user", k)
+                        penalty(k)
+                    except Exception as e:
+                        print("error at penalty: ", e)
 
             vc_a = match_item.get("vc_A")  # or "vc_a" など実際のキー名に合わせる
             if vc_a is not None:
